@@ -7,7 +7,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 cat > "$STAGE/app.py" <<'PY'
 #!/usr/bin/env python3
-"""Frog SOC 6.1; stdlib-only Alpine/OpenRC mini SOC."""
+"""Frog SOC 6.2; stdlib-only Linux mini SOC."""
 import base64
 import collections
 import copy
@@ -34,9 +34,10 @@ import socket
 import subprocess
 import threading
 import time
+import zipfile
 from urllib.parse import urlsplit, parse_qs, urlencode
 
-VERSION = '6.1'
+VERSION = '6.2'
 DEFAULT_CONFIG = {
     'capture_credentials': True, 'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
     'endlessh_logs': ['/var/log/endlessh.log*'],
@@ -242,7 +243,7 @@ def webhooks_notify(content):
         if not url.startswith('https://discord.com/api/webhooks/') and not url.startswith('https://discordapp.com/api/webhooks/'):
             return
         body = json.dumps({'content': content[:1800], 'allowed_mentions': {'parse': []}}).encode()
-        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.1'}, method='POST')
+        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.2'}, method='POST')
         with urllib.request.urlopen(req, timeout=6) as r:
             r.read(128)
         return True
@@ -276,7 +277,7 @@ def geo_lookup(ip):
                     old = c.execute('SELECT checked FROM geo WHERE ip=?',(safe_ip,)).fetchone()
                     if old and time.time()-old[0] < GEO_REFRESH: return
             # Third party geo service receives the public attacker IP; not credentials.
-            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.1'})
+            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.2'})
             with urllib.request.urlopen(req,timeout=3) as r:
                 data = json.load(r)
             if not data.get('success'): return
@@ -729,7 +730,7 @@ def layout(title, content):
     return ("<!doctype html><html lang='pl'><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<script defer src='/assets/live.js'></script><script defer src='/assets/features.js'></script>"
-        "<title>Frog SOC 6.1 — " + esc(title) + "</title><style>"
+        "<title>Frog SOC 6.2 — " + esc(title) + "</title><style>"
         ":root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#020d11;color:#c8ffe0;"
         "font:15px system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:20px}"
         "h1{font-size:27px;margin:12px 0}h2{font-size:17px;margin:0 0 14px}"
@@ -741,7 +742,7 @@ def layout(title, content):
         "td,th{padding:9px;border-bottom:1px solid #28403b;text-align:left;word-break:break-word}"
         "progress{width:100%;height:12px;accent-color:#80f7bc}code{color:#b9fad2}"
         "input,select,button{font:inherit;padding:9px;border-radius:6px;max-width:100%;background:#102c30;color:#dcffe9;border:1px solid #39665b}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}label{display:grid;gap:5px}nav{display:flex;flex-wrap:wrap;gap:8px}svg{max-width:100%}@media(max-width:600px){main{padding:10px}td,th{padding:7px}h1{font-size:22px}.grid{grid-template-columns:1fr}}"
-        "</style><main><nav><b>🐸 FROG SOC 6.1</b> &nbsp; "
+        "</style><main><nav><b>🐸 FROG SOC 6.2</b> &nbsp; "
         "<a href='/soc'>Centrum</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
         "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/credential-stats'>Statystyki logowania</a><a href='/campaigns'>Wzorce botów</a><a href='/reports'>Raport dzienny</a><a href='/rules'>Reguły</a><a href='/healthchecks'>Sprawność usług</a><a href='/demo'>Demo</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
         "</article><p class='muted' id='live-status'>Aktualizacja w tle · dostęp Tailscale/localhost + hasło</p>"
@@ -832,12 +833,21 @@ def old_frog():
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = 'FrogSOC/6.1'
+    server_version = 'WebServer'
+    sys_version = ''
+
+    def version_string(self):
+        return self.server_version
+
+    def send_error(self, code, message=None, explain=None):
+        # Do not reflect request text or expose the Python default error page.
+        reason = self.responses.get(code, ('Error', ''))[0]
+        self.send(code, '<!doctype html><title>'+str(code)+'</title><h2>'+str(code)+' '+esc(reason)+'</h2>')
     def log_message(self, *args):
         pass
 
     def send(self, code, body, ctype='text/html; charset=utf-8', headers=None):
-        b = body.encode('utf-8')
+        b = body if isinstance(body, bytes) else body.encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(b)))
@@ -851,24 +861,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header(k, v)
         self.end_headers()
         try:
-            self.wfile.write(b)
+            if self.command != 'HEAD':
+                self.wfile.write(b)
         except (BrokenPipeError, ConnectionResetError):
             pass
         self.close_connection = True
 
     def authorized(self):
         if not trusted(self.client_address[0]):
-            self.send(403, layout('Odmowa', '<p>Panel tylko przez Tailscale lub localhost.</p>'))
+            self.send(403, 'Access denied.', 'text/plain; charset=utf-8')
             return False
         auth = self.headers.get('Authorization', '')
         expected = 'Basic ' + base64.b64encode(('frog:' + read_password()).encode()).decode()
         if not read_password() or not secrets.compare_digest(auth, expected):
-            self.send(401, 'Wymagane hasło panelu Frog SOC.', 'text/plain; charset=utf-8',
-                      {'WWW-Authenticate': 'Basic realm="Frog SOC", charset="UTF-8"'})
+            self.send(401, 'Authentication required.', 'text/plain; charset=utf-8',
+                      {'WWW-Authenticate': 'Basic realm="Administration", charset="UTF-8"'})
             return False
         return True
 
     def do_GET(self):
+        self.route()
+
+    def do_HEAD(self):
         self.route()
 
     def do_POST(self):
@@ -878,29 +892,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not CONFIG['capture_credentials']:
             return True
         if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
-            self.send(400, 'Wymagana długość formularza.', 'text/plain; charset=utf-8')
+            self.send(400, 'Content length required.', 'text/plain; charset=utf-8')
             return False
         try:
             length = int(self.headers['Content-Length'])
         except (ValueError, TypeError):
-            self.send(400, 'Niepoprawna długość.', 'text/plain; charset=utf-8')
+            self.send(400, 'Invalid content length.', 'text/plain; charset=utf-8')
             return False
         if not 0 <= length <= 4096:
-            self.send(413, 'Za duży formularz.', 'text/plain; charset=utf-8')
+            self.send(413, 'Request too large.', 'text/plain; charset=utf-8')
             return False
         if self.headers.get_content_type() != 'application/x-www-form-urlencoded':
-            self.send(415, 'Nieobsługiwany formularz.', 'text/plain; charset=utf-8')
+            self.send(415, 'Unsupported media type.', 'text/plain; charset=utf-8')
             return False
         old_timeout = self.connection.gettimeout()
         try:
             self.connection.settimeout(3)
             body = self.rfile.read(length)
             if len(body) != length:
-                self.send(400, 'Niekompletny formularz.', 'text/plain; charset=utf-8')
+                self.send(400, 'Incomplete request.', 'text/plain; charset=utf-8')
                 return False
             fields = parse_qs(body.decode('utf-8', 'replace'), keep_blank_values=True, max_num_fields=16)
         except (OSError, ValueError):
-            self.send(400, 'Nie można odczytać formularza.', 'text/plain; charset=utf-8')
+            self.send(400, 'Invalid request.', 'text/plain; charset=utf-8')
             return False
         finally:
             self.connection.settimeout(old_timeout)
@@ -909,7 +923,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 save_credentials(self.client_address[0], fields.get('username', [''])[0], fields.get('password', [''])[0], profile)
             except (OSError, sqlite3.Error):
                 logging.error('Nie udało się zapisać formularza honeypota')
-                self.send(503, 'Spróbuj ponownie później.', 'text/plain; charset=utf-8')
+                self.send(503, 'Service unavailable.', 'text/plain; charset=utf-8')
                 return False
         return True
 
@@ -968,6 +982,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def route(self):
         path = urlsplit(self.path).path
         if path in ('/assets/features.js','/assets/world.svg'):
+            if not self.authorized():
+                return
             name='features.js' if path.endswith('.js') else 'world.svg'
             try:
                 with open(os.path.join(ASSET_DIR,name),encoding='utf-8') as source:
@@ -976,6 +992,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send(503, 'Brak zasobów aplikacji.', 'text/plain; charset=utf-8')
             return
         if path in ('/demo','/demo/data'):
+            if not self.authorized():
+                return
             if not CONFIG['demo_enabled']:
                 self.send(404, 'Demo wyłączone.', 'text/plain; charset=utf-8')
             elif path=='/demo/data':
@@ -1036,7 +1054,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == '/health':
             self.send(200, 'ok', 'text/plain; charset=utf-8')
             return
-        profile = trap_profile(path)
+        profile = None if path.startswith('/traps/') else trap_profile(path)
         if self.command == 'POST' and profile:
             if not self.capture_form(profile):
                 return
@@ -1046,7 +1064,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif profile:
             self.send(200, trap_page(profile, failed=self.command=='POST'))
         elif path in ('/.env','/.git/config','/backup.zip','/config.json'):
-            self.send(200, decoy_file(path), 'text/plain; charset=utf-8')
+            content_type = 'application/zip' if path=='/backup.zip' else 'application/json; charset=utf-8' if path=='/config.json' else 'text/plain; charset=utf-8'
+            self.send(200, decoy_file(path), content_type, {'Content-Disposition':'attachment; filename="backup.zip"'} if path=='/backup.zip' else None)
         else:
             self.send(404, '<!doctype html><title>404</title><h2>404 Not Found</h2>')
 
@@ -1309,7 +1328,7 @@ def dispatch_alerts(alerts, now=None):
     for key,message in current.items():
         active,sent=prior.get(key,(0,0))
         if not active or now-sent>=CONFIG['alerts']['cooldown_seconds']:
-            if webhooks_notify('🚨 **FROG SOC 6.1** | '+message):
+            if webhooks_notify('🚨 **FROG SOC 6.2** | '+message):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('INSERT OR REPLACE INTO alert_state VALUES (?,?,?)',(key,1,now))
@@ -1318,7 +1337,7 @@ def dispatch_alerts(alerts, now=None):
     for key,(active,sent) in prior.items():
         if active and key not in current:
             # Record notices are one-shot observations, not incidents requiring recovery.
-            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.1** | Ustąpił alert: '+key):
+            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.2** | Ustąpił alert: '+key):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('UPDATE alert_state SET active=0 WHERE key=?',(key,))
@@ -1710,7 +1729,7 @@ def trap_hub(host=''):
     cards=''.join('<section><h2>'+TRAP_PROFILES[key][2]+' '+TRAP_PROFILES[key][0]+'</h2><p>'+TRAP_PROFILES[key][1]+'</p><a href="'+TRAP_PATHS[key]+'">Open console →</a></section>' for key in CONFIG['honeypots']['enabled'])
     ssh_port=CONFIG['honeypots']['ssh_public_port'] or ENDLESSH_PORT
     cards+='<section><h2>🔑 SSH Access</h2><p>Remote access service</p><p>TCP port <strong>'+str(ssh_port)+'</strong></p><code>ssh -p '+str(ssh_port)+' '+esc(host)+'</code></section>'
-    return trap_shell('Device Services Portal','<h1>Available services</h1><p>Select the device or service you want to manage.</p><div class="cards">'+cards+'</div><p><small>Configuration resources: <a href="/config.json">configuration</a> · <a href="/backup.zip">backup inventory</a></small></p>')
+    return trap_shell('Device Services Portal','<h1>Available services</h1><p>Select the device or service you want to manage.</p><div class="cards">'+cards+'</div><p><small>Configuration resources: <a href="/config.json">configuration</a> · <a href="/backup.zip">configuration backup</a></small></p>')
 
 
 def trap_page(profile, failed=False):
@@ -1727,13 +1746,23 @@ def trap_page(profile, failed=False):
 
 
 def decoy_file(path):
-    examples={
-        '/.env':'# Demonstration configuration; no working credentials\nAPP_ENV=staging\nDB_HOST=192.0.2.10\nDB_PASSWORD=DECOY_NOT_A_REAL_SECRET\n',
-        '/.git/config':'[core]\n    repositoryformatversion = 0\n[remote "origin"]\n    url = https://example.invalid/device-config.git\n',
-        '/backup.zip':'Backup inventory (placeholder, not an archive)\nrouter-config.json\ncamera-settings.json\nNo real server files are exposed.\n',
-        '/config.json':'{"environment":"staging","node":"demo-device","api":"https://example.invalid/api"}\n'
-    }
-    return examples[path]
+    # Only in-memory fixtures; never read configuration, credentials or VPS files.
+    config = {'environment':'production','node':'gateway-01','api':'http://127.0.0.1/api','timezone':'UTC'}
+    if path == '/backup.zip':
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive:
+            files = {'router-config.json': {'hostname':'gateway-01','lan':{'address':'192.168.1.1','netmask':'255.255.255.0'},'dhcp':True},
+                     'camera-settings.json': {'name':'camera-01','resolution':'1920x1080','recording':{'enabled':True,'retention_days':7}}}
+            for name, value in files.items():
+                item = zipfile.ZipInfo(name, date_time=(2025,1,1,0,0,0))
+                item.external_attr = 0o600 << 16
+                archive.writestr(item, json.dumps(value, indent=2)+'\n')
+        return output.getvalue()
+    return {
+        '/.env':'APP_ENV=production\nAPP_NAME=gateway-manager\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_DATABASE=gateway\nDB_USERNAME=gateway_app\nDB_PASSWORD=gw_local_R7m2q8v4\n',
+        '/.git/config':'[core]\n    repositoryformatversion = 0\n    bare = false\n[remote "origin"]\n    url = ssh://git@git.infra.lan/network/gateway-config.git\n    fetch = +refs/heads/*:refs/remotes/origin/*\n',
+        '/config.json':json.dumps(config, indent=2)+'\n'
+    }[path]
 
 
 def clean_agent(agent):
@@ -2126,7 +2155,7 @@ rollback() {
 }
 rc-service frog-soc restart || rollback
 if ! python3 - <<'PY'
-import base64, contextlib, importlib.util, pathlib, re, secrets, sqlite3, time, urllib.request, urllib.error, urllib.parse
+import base64, contextlib, importlib.util, io, pathlib, re, secrets, sqlite3, time, urllib.request, urllib.error, urllib.parse, zipfile
 spec=importlib.util.spec_from_file_location('verify','/opt/frog-soc/app.py')
 app=importlib.util.module_from_spec(spec);spec.loader.exec_module(app)
 password=pathlib.Path(app.PASSWORD_FILE).read_text().strip()
@@ -2134,7 +2163,7 @@ headers={'Authorization':'Basic '+base64.b64encode(('frog:'+password).encode()).
 base='http://127.0.0.1:'+str(app.PORT)
 for attempt in range(20):
     try:
-        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.1'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
+        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.2'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
             if path=='/demo' and not app.CONFIG['demo_enabled']: continue
             request=urllib.request.Request(base+path,headers=headers)
             with urllib.request.urlopen(request,timeout=5) as response:
@@ -2147,6 +2176,21 @@ for attempt in range(20):
             raise AssertionError('Nieprawidłowy filtr nie został odrzucony')
         except urllib.error.HTTPError as exc:
             assert exc.code==400
+        with urllib.request.urlopen(base+'/',timeout=5) as response:
+            public=response.read().decode().lower()
+            assert response.headers['Server']=='WebServer'
+            assert not any(marker in public for marker in ('/traps','frog soc','endlessh','honeypot'))
+        with urllib.request.urlopen(base+'/backup.zip',timeout=5) as response:
+            assert response.headers.get_content_type()=='application/zip'
+            with zipfile.ZipFile(io.BytesIO(response.read())) as archive:
+                assert archive.testzip() is None
+                assert len(archive.namelist())==2
+        for path in ('/demo','/demo/data','/assets/features.js','/assets/world.svg'):
+            try:
+                urllib.request.urlopen(base+path,timeout=5)
+                raise AssertionError('Zasób panelu jest publiczny: '+path)
+            except urllib.error.HTTPError as exc:
+                assert exc.code==401
         if app.CONFIG['capture_credentials']:
             username='__frog_check__'+secrets.token_hex(8)
             password=secrets.token_hex(16)
@@ -2185,7 +2229,7 @@ rc-service frog-soc status || rollback
 if command -v logrotate >/dev/null 2>&1 && [ -f "$STAGE/frog-soc.logrotate" ]; then
     cp "$STAGE/frog-soc.logrotate" /etc/logrotate.d/frog-soc
 fi
-printf 'Frog SOC 6.1 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
+printf 'Frog SOC 6.2 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
 DEPLOY
 cat > "$STAGE/frog-soc.logrotate" <<'ROTATION'
 /var/log/endlessh.log /var/log/frog-soc.log {

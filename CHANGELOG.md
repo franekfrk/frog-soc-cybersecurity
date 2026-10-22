@@ -1,5 +1,12 @@
 # Zmiany
 
+## 6.2
+
+- Neutralne nagłówki HTTP, odmowy dostępu i błędy protokołu; obsługa HEAD.
+- Demo i zasoby panelu wymagają autoryzacji; stare adresy /traps zwracają 404.
+- Spójne, fikcyjne pliki konfiguracji i prawidłowy ZIP tworzony wyłącznie w pamięci.
+- Bez odczytu prawdziwych plików VPS; README PL/EN i 51 testów.
+
 ## 6.1
 
 - Zwykłe adresy usług i formularzy bez publicznego prefiksu /traps; stare aliasy zachowane.

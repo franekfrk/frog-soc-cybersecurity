@@ -1,4 +1,4 @@
-# 🐸 Frog SOC 6.1
+# 🐸 Frog SOC 6.2
 
 [Polski](README.md) · **English**
 
@@ -11,10 +11,26 @@ the application itself can also run on other Linux distributions.
 
 Frog observes and alerts. It does not block IPs or replace a firewall or SIEM.
 
+## New in 6.2
+
+Public responses use a neutral `Server: WebServer` header without the Frog name
+or Python version. Access denials and HTTP errors disclose neither the project
+name nor the Tailscale requirement. `HEAD` is supported without response bodies.
+Demo routes (`/demo`, `/demo/data`) and dashboard assets (`/assets/*`) now require
+Tailscale/localhost and dashboard authentication; demo keeps its fictional-data labels.
+Previous `/traps/...` URLs return 404; their historical events remain available for analysis.
+
+Public `.env`, Git configuration and JSON contain only fixed, fabricated decoys
+without DECOY/placeholder labels. `/backup.zip` is a valid ZIP with two fictional
+JSON files, generated in memory without reading VPS files. The included password
+is an invented string that is not used by any service. These changes remove explicit
+labels; they do not guarantee a honeypot cannot be identified through its behavior,
+similarity to the project source or protocol analysis.
+
 ## New in 6.1
 
 Public links and form actions use ordinary service routes without the `/traps`
-prefix. Previous routes remain supported as compatibility aliases.
+prefix. In 6.1 previous routes remained compatibility aliases; since 6.2 they return 404.
 
 The public portal includes a neutral **SSH Access** card, port number and
 `ssh -p PORT HOST` example, using the host of the opened page. It does not disclose Endlessh, honeypot
@@ -43,8 +59,8 @@ Forms submit to `/router/login`, `/camera/login`, `/storage/login`,
 real authentication, files, streams or command execution. Captured submissions
 now include their originating profile; older submissions are marked as router.
 Additional decoys `/.env`, `/.git/config`, `/backup.zip` and `/config.json`
-return prepared fictional content, never actual VPS files. `/backup.zip`
-is a plain-text backup inventory placeholder, not an archive.
+return prepared fictional content, never actual VPS files. Since 6.2 `/backup.zip`
+is a valid ZIP archive containing fictional JSON files.
 
 All profiles share **one Frog HTTP port**. No six additional public ports are
 needed; Endlessh keeps its own separate TCP port. Example configuration:
@@ -124,11 +140,11 @@ Only HTTP events with an existing geolocation entry are shown. Outlines need
 no external tiles or CDN; IP geolocation still uses `ipwho.is` as configured.
 Map source and terms are documented in `THIRD_PARTY.md`.
 
-Public `/demo` and `/demo/data` use only fictional data and documentation IPs.
+Protected `/demo` and `/demo/data` use only fictional data and documentation IPs.
 They never read production databases, log visits/submissions or expose admin
-operations. You can demonstrate Frog without disclosing VPS history; network
-access still depends on your exposed port. Disable with `demo_enabled: false`.
-The demo is not linked from the honeypot services portal.
+operations. They require Tailscale/localhost and dashboard authentication,
+as do map assets and scripts. Disable with `demo_enabled: false`.
+The demo is not linked from the public services portal.
 
 ## New in 5.2
 
@@ -402,7 +418,7 @@ A standalone generated updater is also available:
 sudo sh update-frog-soc-4.sh
 ```
 
-The filename is retained for compatibility; it installs **6.1** using the same
+The filename is retained for compatibility; it installs **6.2** using the same
 backup and validation procedure as `deploy/deploy.sh`.
 
 ## Access and dashboard routes
@@ -437,7 +453,7 @@ Then open `http://127.0.0.1:8080/soc`.
 | `/credentials` | Usernames/passwords submitted to the fake router form |
 | `/rules` | Dashboard-managed observation rules |
 | `/healthchecks` | Real service checks |
-| `/demo` | Public demonstration using fictional data |
+| `/demo` | Protected demonstration using fictional data |
 | `/settings` | Configuration, importer, backup and maintenance status |
 | `/stats` | Recent HTTP and buffer rankings; hourly count from SQLite |
 | `/history` | 48-hour HTTP history |
@@ -539,10 +555,10 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-48 tests cover log import/rotation, IPv6, filters/CSV, configuration validation,
+51 tests cover log import/rotation, IPv6, filters/CSV, configuration validation,
 persistent alerts/XP, SQLite backups, authenticated HTTP routes, submission
 capture, access control, retention, new honeypots, database-isolated demo,
-map data, bot profiles, observation rules, service checks, statistics, pattern grouping, report scheduling
+map data, HTTP headers/errors, HEAD, private assets, valid ZIP archives, bot profiles, observation rules, service checks, statistics, pattern grouping, report scheduling
 and confirmed deletion with CSRF tokens. HTTP tests require local TCP sockets.
 
 Keep **both README languages updated together**, as required by `AGENTS.md`.

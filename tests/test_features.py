@@ -128,7 +128,7 @@ class FeatureTests(unittest.TestCase):
         self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
         base='http://127.0.0.1:'+str(server.server_port)
         auth='Basic '+base64.b64encode(b'frog:test-only-password').decode()
-        for path,marker in [('/soc','Aktywność'),('/ssh?sort=longest','Port źródłowy'),('/ssh.csv?status=closed','2.125'),('/activity','Wspólna aktywność'),('/ip?ip=192.0.2.10','Łączny czas'),('/settings','6.1'),('/assets/live.js','setInterval'),('/frog','XP')]:
+        for path,marker in [('/soc','Aktywność'),('/ssh?sort=longest','Port źródłowy'),('/ssh.csv?status=closed','2.125'),('/activity','Wspólna aktywność'),('/ip?ip=192.0.2.10','Łączny czas'),('/settings','6.2'),('/assets/live.js','setInterval'),('/frog','XP')]:
             with self.subTest(path=path):
                 with urllib.request.urlopen(urllib.request.Request(base+path,headers={'Authorization':auth})) as response:
                     self.assertIn(marker,response.read().decode())

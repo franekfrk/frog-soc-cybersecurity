@@ -1,4 +1,4 @@
-# 🐸 Frog SOC 6.1
+# 🐸 Frog SOC 6.2
 
 **Polski** · [English](README.en.md)
 
@@ -10,10 +10,26 @@ dla Alpine/OpenRC; aplikację można uruchomić również na innych dystrybucjac
 
 Frog obserwuje i alarmuje. Nie blokuje IP, nie zastępuje firewalla ani SIEM.
 
+## Co nowego w 6.2
+
+Publiczne odpowiedzi mają neutralny nagłówek `Server: WebServer`, bez nazwy
+Frog i wersji Pythona. Odmowy dostępu oraz błędy HTTP nie ujawniają nazwy
+projektu ani wymogu Tailscale. Obsługiwane jest również `HEAD` bez treści.
+Demo (`/demo`, `/demo/data`) i zasoby panelu (`/assets/*`) wymagają teraz
+Tailscale/localhost oraz hasła panelu; demo zachowuje oznaczenia fikcyjnych danych.
+Dawne adresy `/traps/...` zwracają 404; ich historyczne zdarzenia nadal są analizowane.
+
+Publiczne `.env`, konfiguracja Git i JSON zawierają wyłącznie stałe, wygenerowane
+przynęty bez napisów DECOY/placeholder. `/backup.zip` to prawidłowy ZIP z dwoma
+fikcyjnymi plikami JSON, tworzony w pamięci, bez odczytu plików VPS.
+Wpisane tam hasło jest wymyślonym ciągiem i nie jest używane przez żadną usługę.
+Ta zmiana usuwa jawne oznaczenia; nie gwarantuje nierozpoznawalności honeypota
+na podstawie zachowania, podobieństwa do kodu projektu lub analizy protokołu.
+
 ## Co nowego w 6.1
 
 Publiczne linki i formularze korzystają ze zwykłych adresów usług, bez prefiksu
-`/traps`. Stare adresy pozostają aliasami dla zgodności.
+`/traps`. W wersji 6.1 stare adresy pozostawały aliasami; od 6.2 zwracają 404.
 
 Publiczny portal zawiera neutralną kartę **SSH Access**, numer portu i przykład
 `ssh -p PORT ADRES` (adres pochodzi z hosta otwartej strony). Nie ujawnia nazwy Endlessh, przeznaczenia
@@ -44,7 +60,7 @@ prawdziwego logowania, plików, streamingu ani wykonywania poleceń. Zapisane
 formularze mają teraz oznaczenie pułapki. Stare wpisy są oznaczane jako router.
 Dodatkowe przynęty `/.env`, `/.git/config`, `/backup.zip`, `/config.json`
 zwracają wyłącznie przygotowane, fikcyjne dane — nigdy pliki VPS.
-`/backup.zip` jest tekstową atrapą listy kopii, nie archiwum.
+Od 6.2 `/backup.zip` jest prawidłowym archiwum ZIP z fikcyjnymi plikami JSON.
 
 Wszystko działa na **jednym porcie HTTP Frog**. Nie trzeba wystawiać sześciu
 nowych portów; Endlessh nadal korzysta ze swojego osobnego portu TCP.
@@ -123,11 +139,11 @@ Widoczne są tylko zdarzenia HTTP, których IP ma już wpis geolokalizacji.
 Kontury nie wymagają kafelków ani CDN; geolokalizacja nadal używa `ipwho.is`
 zgodnie z konfiguracją. Źródło i warunki mapy: `THIRD_PARTY.md`.
 
-Publiczne `/demo` i `/demo/data` korzystają wyłącznie z fikcyjnych danych oraz
+Chronione `/demo` i `/demo/data` korzystają wyłącznie z fikcyjnych danych oraz
 adresów dokumentacyjnych. Nie czytają bazy produkcyjnej, nie zapisują odwiedzin
-ani formularzy i nie udostępniają operacji administracyjnych. Można pokazać demo
-bez ujawniania historii VPS; dostęp sieciowy nadal zależy od wystawionego portu.
-Wyłączenie: `demo_enabled: false`. Demo nie jest linkowane z portalu pułapek.
+ani formularzy i nie udostępniają operacji administracyjnych. Dostęp wymaga
+Tailscale/localhost i hasła panelu, podobnie jak zasoby mapy i skrypty.
+Wyłączenie: `demo_enabled: false`. Demo nie jest linkowane z publicznego portalu.
 
 ## Co nowego w 5.2
 
@@ -395,7 +411,7 @@ Można też użyć pojedynczego, generowanego skryptu:
 sudo sh update-frog-soc-4.sh
 ```
 
-Nazwa została zachowana dla zgodności; skrypt wdraża **6.1** i korzysta z tej
+Nazwa została zachowana dla zgodności; skrypt wdraża **6.2** i korzysta z tej
 samej procedury backupu i kontroli co `deploy/deploy.sh`.
 
 ## Dostęp i widoki
@@ -430,7 +446,7 @@ Następnie otwórz `http://127.0.0.1:8080/soc`.
 | `/credentials` | Loginy i hasła wpisane do fałszywego panelu routera |
 | `/rules` | Reguły obserwacji zarządzane z panelu |
 | `/healthchecks` | Rzeczywiste testy usług |
-| `/demo` | Publiczny pokaz z fikcyjnymi danymi |
+| `/demo` | Chroniony pokaz z fikcyjnymi danymi |
 | `/settings` | Konfiguracja, stan odczytu logów, backupu i utrzymania |
 | `/stats` | Ostatnie HTTP i rankingi z bufora; licznik godzinowy z SQLite |
 | `/history` | Godzinowa historia HTTP 48 h |
@@ -535,10 +551,11 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-48 testów obejmuje import i rotację logów, sesje IPv6, filtry/CSV,
+51 testów obejmuje import i rotację logów, sesje IPv6, filtry/CSV,
 walidację konfiguracji, trwałość wyciszenia i XP, backup SQLite oraz
 prawdziwe żądania HTTP z autoryzacją, nowe pułapki, demo bez odczytu bazy,
-mapę, profile botów, reguły, testy usług, statystyki i wzorce prób, harmonogram
+mapę, nagłówki i błędy HTTP, HEAD, prywatność zasobów, poprawność ZIP,
+profile botów, reguły, testy usług, statystyki i wzorce prób, harmonogram
 raportów oraz usuwanie wpisów z tokenem i potwierdzeniem. Test HTTP wymaga możliwości otwarcia
 lokalnego gniazda TCP.
 

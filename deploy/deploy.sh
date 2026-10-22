@@ -60,7 +60,7 @@ rollback() {
 }
 rc-service frog-soc restart || rollback
 if ! python3 - <<'PY'
-import base64, contextlib, importlib.util, pathlib, re, secrets, sqlite3, time, urllib.request, urllib.error, urllib.parse
+import base64, contextlib, importlib.util, io, pathlib, re, secrets, sqlite3, time, urllib.request, urllib.error, urllib.parse, zipfile
 spec=importlib.util.spec_from_file_location('verify','/opt/frog-soc/app.py')
 app=importlib.util.module_from_spec(spec);spec.loader.exec_module(app)
 password=pathlib.Path(app.PASSWORD_FILE).read_text().strip()
@@ -68,7 +68,7 @@ headers={'Authorization':'Basic '+base64.b64encode(('frog:'+password).encode()).
 base='http://127.0.0.1:'+str(app.PORT)
 for attempt in range(20):
     try:
-        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.1'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
+        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.2'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
             if path=='/demo' and not app.CONFIG['demo_enabled']: continue
             request=urllib.request.Request(base+path,headers=headers)
             with urllib.request.urlopen(request,timeout=5) as response:
@@ -81,6 +81,21 @@ for attempt in range(20):
             raise AssertionError('Nieprawidłowy filtr nie został odrzucony')
         except urllib.error.HTTPError as exc:
             assert exc.code==400
+        with urllib.request.urlopen(base+'/',timeout=5) as response:
+            public=response.read().decode().lower()
+            assert response.headers['Server']=='WebServer'
+            assert not any(marker in public for marker in ('/traps','frog soc','endlessh','honeypot'))
+        with urllib.request.urlopen(base+'/backup.zip',timeout=5) as response:
+            assert response.headers.get_content_type()=='application/zip'
+            with zipfile.ZipFile(io.BytesIO(response.read())) as archive:
+                assert archive.testzip() is None
+                assert len(archive.namelist())==2
+        for path in ('/demo','/demo/data','/assets/features.js','/assets/world.svg'):
+            try:
+                urllib.request.urlopen(base+path,timeout=5)
+                raise AssertionError('Zasób panelu jest publiczny: '+path)
+            except urllib.error.HTTPError as exc:
+                assert exc.code==401
         if app.CONFIG['capture_credentials']:
             username='__frog_check__'+secrets.token_hex(8)
             password=secrets.token_hex(16)
@@ -119,4 +134,4 @@ rc-service frog-soc status || rollback
 if command -v logrotate >/dev/null 2>&1 && [ -f "$STAGE/frog-soc.logrotate" ]; then
     cp "$STAGE/frog-soc.logrotate" /etc/logrotate.d/frog-soc
 fi
-printf 'Frog SOC 6.1 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
+printf 'Frog SOC 6.2 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
