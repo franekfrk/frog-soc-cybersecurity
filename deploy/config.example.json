@@ -69,7 +69,8 @@
       "wordpress",
       "api"
     ],
-    "homepage": "hub"
+    "homepage": "hub",
+    "ssh_public_port": 0
   },
   "health_checks": {
     "gatus_url": "http://127.0.0.1:21888/health",

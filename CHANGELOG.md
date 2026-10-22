@@ -1,5 +1,14 @@
 # Zmiany
 
+## 6.1
+
+- Zwykłe adresy usług i formularzy bez publicznego prefiksu /traps; stare aliasy zachowane.
+
+- Neutralna publiczna karta SSH Access z portem i przykładem połączenia.
+- Osobny opcjonalny port publiczny dla konfiguracji NAT.
+- Bez nazwy Endlessh i odnośników do panelu SOC na publicznej karcie.
+- README PL/EN oraz 48 testów.
+
 ## 6.0
 
 - Portal publiczny z linkami do sześciu pułapek: router, kamera, NAS, admin, WordPress i API.

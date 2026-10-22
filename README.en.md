@@ -1,4 +1,4 @@
-# 🐸 Frog SOC 6.0
+# 🐸 Frog SOC 6.1
 
 [Polski](README.md) · **English**
 
@@ -11,6 +11,18 @@ the application itself can also run on other Linux distributions.
 
 Frog observes and alerts. It does not block IPs or replace a firewall or SIEM.
 
+## New in 6.1
+
+Public links and form actions use ordinary service routes without the `/traps`
+prefix. Previous routes remain supported as compatibility aliases.
+
+The public portal includes a neutral **SSH Access** card, port number and
+`ssh -p PORT HOST` example, using the host of the opened page. It does not disclose Endlessh, honeypot
+purpose or SOC dashboard links. Operational details stay in the protected panel.
+`honeypots.ssh_public_port` controls the displayed port; `0` (the default) uses
+`endlessh_port`. With NAT, set the actual public port here. This does not change
+listeners or port mappings. Replace documentation example ports with yours.
+
 ## New in 6.0
 
 ### More honeypots, linked from the homepage
@@ -19,14 +31,15 @@ The public `/` page is a services portal linking to six separate profiles:
 
 | Route | Honeypot |
 | --- | --- |
-| `/traps/router` | Router management |
-| `/traps/camera` | IP camera console |
-| `/traps/nas` | Network storage / NAS |
-| `/traps/admin` | Administration console |
-| `/traps/wordpress` | Website publishing console |
-| `/traps/api` | API integration console |
+| `/router` | Router management |
+| `/camera` | IP camera console |
+| `/storage` | Network storage / NAS |
+| `/console` | Administration console |
+| `/wp-admin` | Website publishing console |
+| `/api` | API integration console |
 
-Each profile submits to `/traps/PROFILE/login`. These pages do not provide
+Forms submit to `/router/login`, `/camera/login`, `/storage/login`,
+`/console/login`, `/wp-login.php` and `/api/login`. These pages do not provide
 real authentication, files, streams or command execution. Captured submissions
 now include their originating profile; older submissions are marked as router.
 Additional decoys `/.env`, `/.git/config`, `/backup.zip` and `/config.json`
@@ -389,7 +402,7 @@ A standalone generated updater is also available:
 sudo sh update-frog-soc-4.sh
 ```
 
-The filename is retained for compatibility; it installs **6.0** using the same
+The filename is retained for compatibility; it installs **6.1** using the same
 backup and validation procedure as `deploy/deploy.sh`.
 
 ## Access and dashboard routes
@@ -526,7 +539,7 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-47 tests cover log import/rotation, IPv6, filters/CSV, configuration validation,
+48 tests cover log import/rotation, IPv6, filters/CSV, configuration validation,
 persistent alerts/XP, SQLite backups, authenticated HTTP routes, submission
 capture, access control, retention, new honeypots, database-isolated demo,
 map data, bot profiles, observation rules, service checks, statistics, pattern grouping, report scheduling

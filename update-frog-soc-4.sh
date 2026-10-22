@@ -7,7 +7,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 cat > "$STAGE/app.py" <<'PY'
 #!/usr/bin/env python3
-"""Frog SOC 6.0; stdlib-only Alpine/OpenRC mini SOC."""
+"""Frog SOC 6.1; stdlib-only Alpine/OpenRC mini SOC."""
 import base64
 import collections
 import copy
@@ -36,7 +36,7 @@ import threading
 import time
 from urllib.parse import urlsplit, parse_qs, urlencode
 
-VERSION = '6.0'
+VERSION = '6.1'
 DEFAULT_CONFIG = {
     'capture_credentials': True, 'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
     'endlessh_logs': ['/var/log/endlessh.log*'],
@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
     'maintenance': {'interval_seconds': 3600, 'backup_hours': 24, 'backup_keep': 7},
     'daily_report': {'enabled': True, 'hour': 20, 'minute': 0},
     'campaigns': {'window_hours': 24, 'min_ips': 2, 'min_attempts': 3},
-    'honeypots': {'enabled': ['router', 'camera', 'nas', 'admin', 'wordpress', 'api'], 'homepage': 'hub'},
+    'honeypots': {'enabled': ['router', 'camera', 'nas', 'admin', 'wordpress', 'api'], 'homepage': 'hub', 'ssh_public_port': 0},
     'health_checks': {'gatus_url': 'http://127.0.0.1:21888/health', 'timeout_seconds': 2, 'interval_seconds': 30, 'endlessh_stale_seconds': 120},
     'demo_enabled': True
 }
@@ -104,6 +104,8 @@ def load_config(path):
         raise ValueError('Nieprawidłowe profile pułapek')
     if config['honeypots']['homepage'] not in ['hub']+config['honeypots']['enabled']:
         raise ValueError('Nieprawidłowa strona główna pułapki')
+    if not 0 <= config['honeypots']['ssh_public_port'] <= 65535:
+        raise ValueError('Nieprawidłowy publiczny port SSH')
     for key in ('timeout_seconds','interval_seconds','endlessh_stale_seconds'):
         if not 1 <= config['health_checks'][key] <= 3600:
             raise ValueError('Nieprawidłowy interwał health_checks')
@@ -240,7 +242,7 @@ def webhooks_notify(content):
         if not url.startswith('https://discord.com/api/webhooks/') and not url.startswith('https://discordapp.com/api/webhooks/'):
             return
         body = json.dumps({'content': content[:1800], 'allowed_mentions': {'parse': []}}).encode()
-        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.0'}, method='POST')
+        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.1'}, method='POST')
         with urllib.request.urlopen(req, timeout=6) as r:
             r.read(128)
         return True
@@ -274,7 +276,7 @@ def geo_lookup(ip):
                     old = c.execute('SELECT checked FROM geo WHERE ip=?',(safe_ip,)).fetchone()
                     if old and time.time()-old[0] < GEO_REFRESH: return
             # Third party geo service receives the public attacker IP; not credentials.
-            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.0'})
+            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.1'})
             with urllib.request.urlopen(req,timeout=3) as r:
                 data = json.load(r)
             if not data.get('success'): return
@@ -727,7 +729,7 @@ def layout(title, content):
     return ("<!doctype html><html lang='pl'><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<script defer src='/assets/live.js'></script><script defer src='/assets/features.js'></script>"
-        "<title>Frog SOC 6.0 — " + esc(title) + "</title><style>"
+        "<title>Frog SOC 6.1 — " + esc(title) + "</title><style>"
         ":root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#020d11;color:#c8ffe0;"
         "font:15px system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:20px}"
         "h1{font-size:27px;margin:12px 0}h2{font-size:17px;margin:0 0 14px}"
@@ -739,7 +741,7 @@ def layout(title, content):
         "td,th{padding:9px;border-bottom:1px solid #28403b;text-align:left;word-break:break-word}"
         "progress{width:100%;height:12px;accent-color:#80f7bc}code{color:#b9fad2}"
         "input,select,button{font:inherit;padding:9px;border-radius:6px;max-width:100%;background:#102c30;color:#dcffe9;border:1px solid #39665b}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}label{display:grid;gap:5px}nav{display:flex;flex-wrap:wrap;gap:8px}svg{max-width:100%}@media(max-width:600px){main{padding:10px}td,th{padding:7px}h1{font-size:22px}.grid{grid-template-columns:1fr}}"
-        "</style><main><nav><b>🐸 FROG SOC 6.0</b> &nbsp; "
+        "</style><main><nav><b>🐸 FROG SOC 6.1</b> &nbsp; "
         "<a href='/soc'>Centrum</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
         "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/credential-stats'>Statystyki logowania</a><a href='/campaigns'>Wzorce botów</a><a href='/reports'>Raport dzienny</a><a href='/rules'>Reguły</a><a href='/healthchecks'>Sprawność usług</a><a href='/demo'>Demo</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
         "</article><p class='muted' id='live-status'>Aktualizacja w tle · dostęp Tailscale/localhost + hasło</p>"
@@ -830,7 +832,7 @@ def old_frog():
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = 'FrogSOC/6.0'
+    server_version = 'FrogSOC/6.1'
     def log_message(self, *args):
         pass
 
@@ -1040,7 +1042,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
         log_event(self.client_address[0], path, self.command, self.headers.get('User-Agent',''), profile or '')
         if path=='/':
-            self.send(200, trap_hub() if CONFIG['honeypots']['homepage']=='hub' else trap_page(CONFIG['honeypots']['homepage']))
+            self.send(200, trap_hub(self.headers.get('Host','')) if CONFIG['honeypots']['homepage']=='hub' else trap_page(CONFIG['honeypots']['homepage']))
         elif profile:
             self.send(200, trap_page(profile, failed=self.command=='POST'))
         elif path in ('/.env','/.git/config','/backup.zip','/config.json'):
@@ -1307,7 +1309,7 @@ def dispatch_alerts(alerts, now=None):
     for key,message in current.items():
         active,sent=prior.get(key,(0,0))
         if not active or now-sent>=CONFIG['alerts']['cooldown_seconds']:
-            if webhooks_notify('🚨 **FROG SOC 6.0** | '+message):
+            if webhooks_notify('🚨 **FROG SOC 6.1** | '+message):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('INSERT OR REPLACE INTO alert_state VALUES (?,?,?)',(key,1,now))
@@ -1316,7 +1318,7 @@ def dispatch_alerts(alerts, now=None):
     for key,(active,sent) in prior.items():
         if active and key not in current:
             # Record notices are one-shot observations, not incidents requiring recovery.
-            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.0** | Ustąpił alert: '+key):
+            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.1** | Ustąpił alert: '+key):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('UPDATE alert_state SET active=0 WHERE key=?',(key,))
@@ -1668,7 +1670,16 @@ TRAP_PROFILES = {
 }
 
 
+TRAP_PATHS = {'router':'/router','camera':'/camera','nas':'/storage','admin':'/console','wordpress':'/wp-admin','api':'/api'}
+TRAP_LOGIN_PATHS = {'router':'/router/login','camera':'/camera/login','nas':'/storage/login','admin':'/console/login','wordpress':'/wp-login.php','api':'/api/login'}
+
+
 def trap_profile(path):
+    natural={route:profile for profile,route in TRAP_PATHS.items()}
+    natural.update({route:profile for profile,route in TRAP_LOGIN_PATHS.items()})
+    if path.rstrip('/') in natural:
+        profile=natural[path.rstrip('/')]
+        return profile if profile in CONFIG['honeypots']['enabled'] else None
     aliases={'/admin':'router','/login':'router','/cgi-bin/luci':'router','/wp-login.php':'wordpress','/wp-admin':'wordpress','/camera':'camera','/nas':'nas','/api/login':'api'}
     if path=='/':
         selected=CONFIG['honeypots']['homepage']
@@ -1684,8 +1695,21 @@ def trap_shell(title, content):
     return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>body{margin:0;background:#eef2f6;color:#203447;font:16px system-ui}header{background:#203447;color:white;padding:24px}main{max-width:1000px;margin:40px auto;padding:16px}section{background:white;padding:25px;border-radius:10px;border:1px solid #d2dce6}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}a{color:#2261a0}label{display:block;margin:16px 0}input,button{padding:12px;font:inherit;box-sizing:border-box;max-width:100%;border:1px solid #bac8d4;border-radius:5px}input{width:100%}button{background:#2261a0;color:white}form{max-width:400px}small{color:#66798c}</style><header><b>'+esc(title)+'</b></header><main>'+content+'</main></html>'
 
 
-def trap_hub():
-    cards=''.join('<section><h2>'+TRAP_PROFILES[key][2]+' '+TRAP_PROFILES[key][0]+'</h2><p>'+TRAP_PROFILES[key][1]+'</p><a href="/traps/'+key+'">Open console →</a></section>' for key in CONFIG['honeypots']['enabled'])
+def public_host(raw):
+    try:
+        host=urlsplit('//'+raw).hostname or ''
+        if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}',host):
+            return host
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return 'SERVER_ADDRESS'
+
+
+def trap_hub(host=''):
+    host=public_host(host)
+    cards=''.join('<section><h2>'+TRAP_PROFILES[key][2]+' '+TRAP_PROFILES[key][0]+'</h2><p>'+TRAP_PROFILES[key][1]+'</p><a href="'+TRAP_PATHS[key]+'">Open console →</a></section>' for key in CONFIG['honeypots']['enabled'])
+    ssh_port=CONFIG['honeypots']['ssh_public_port'] or ENDLESSH_PORT
+    cards+='<section><h2>🔑 SSH Access</h2><p>Remote access service</p><p>TCP port <strong>'+str(ssh_port)+'</strong></p><code>ssh -p '+str(ssh_port)+' '+esc(host)+'</code></section>'
     return trap_shell('Device Services Portal','<h1>Available services</h1><p>Select the device or service you want to manage.</p><div class="cards">'+cards+'</div><p><small>Configuration resources: <a href="/config.json">configuration</a> · <a href="/backup.zip">backup inventory</a></small></p>')
 
 
@@ -1699,7 +1723,7 @@ def trap_page(profile, failed=False):
         'wordpress':'Publishing dashboard · Themes · Site settings',
         'api':'API keys · Integrations · Request usage'
     }[profile]
-    return trap_shell(title,'<p><a href="/">← All services</a></p><section><h1>'+icon+' '+esc(title)+'</h1><p>'+esc(subtitle)+'</p><p><small>'+esc(context)+'</small></p>'+('<p role="alert">Sign-in failed. Check your credentials.</p>' if failed else '')+'<form method="post" action="/traps/'+profile+'/login"><label>Username<input name="username" autocomplete="off" maxlength="256"></label><label>Password<input type="password" name="password" autocomplete="off" maxlength="512"></label><button>Sign in</button></form></section>')
+    return trap_shell(title,'<p><a href="/">← All services</a></p><section><h1>'+icon+' '+esc(title)+'</h1><p>'+esc(subtitle)+'</p><p><small>'+esc(context)+'</small></p>'+('<p role="alert">Sign-in failed. Check your credentials.</p>' if failed else '')+'<form method="post" action="'+TRAP_LOGIN_PATHS[profile]+'"><label>Username<input name="username" autocomplete="off" maxlength="256"></label><label>Password<input type="password" name="password" autocomplete="off" maxlength="512"></label><button>Sign in</button></form></section>')
 
 
 def decoy_file(path):
@@ -1723,11 +1747,11 @@ def scan_classification(path):
         ('Repozytorium Git',('metadane Git',),lambda p: '/.git/' in p),
         ('Kopie zapasowe',('nazwa archiwum',),lambda p: any(p.endswith(ext) for ext in ('.zip','.bak','.sql','.tar.gz'))),
         ('WordPress',('ścieżka WordPress',),lambda p: 'wp-' in p or '/wordpress' in p),
-        ('Router / CGI',('CGI albo konsola routera',),lambda p: '/cgi-bin/' in p or '/traps/router' in p),
+        ('Router / CGI',('CGI albo konsola routera',),lambda p: '/cgi-bin/' in p or '/traps/router' in p or p.startswith('/router')),
         ('Kamera IP',('konsola kamery',),lambda p: '/camera' in p),
-        ('NAS',('konsola pamięci sieciowej',),lambda p: '/nas' in p),
+        ('NAS',('konsola pamięci sieciowej',),lambda p: '/nas' in p or p.startswith('/storage')),
         ('API',('ścieżka API',),lambda p: p.startswith('/api') or '/traps/api' in p),
-        ('Panel administracyjny',('ścieżka logowania',),lambda p: '/admin' in p or '/login' in p)
+        ('Panel administracyjny',('ścieżka logowania',),lambda p: '/admin' in p or '/login' in p or p.startswith('/console'))
     ]
     for label,reasons,predicate in checks:
         if predicate(path):
@@ -2027,7 +2051,8 @@ cat > "$STAGE/config.example.json" <<'CONFIG'
       "wordpress",
       "api"
     ],
-    "homepage": "hub"
+    "homepage": "hub",
+    "ssh_public_port": 0
   },
   "health_checks": {
     "gatus_url": "http://127.0.0.1:21888/health",
@@ -2109,14 +2134,14 @@ headers={'Authorization':'Basic '+base64.b64encode(('frog:'+password).encode()).
 base='http://127.0.0.1:'+str(app.PORT)
 for attempt in range(20):
     try:
-        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.0'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
+        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.1'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
             if path=='/demo' and not app.CONFIG['demo_enabled']: continue
             request=urllib.request.Request(base+path,headers=headers)
             with urllib.request.urlopen(request,timeout=5) as response:
                 assert marker in response.read().decode(), path
         for profile in app.CONFIG['honeypots']['enabled']:
-            with urllib.request.urlopen(base+'/traps/'+profile,timeout=5) as response:
-                assert 'action="/traps/'+profile+'/login"' in response.read().decode()
+            with urllib.request.urlopen(base+app.TRAP_PATHS[profile],timeout=5) as response:
+                assert 'action="'+app.TRAP_LOGIN_PATHS[profile]+'"' in response.read().decode()
         try:
             urllib.request.urlopen(urllib.request.Request(base+'/ssh?from=bad',headers=headers),timeout=5)
             raise AssertionError('Nieprawidłowy filtr nie został odrzucony')
@@ -2160,7 +2185,7 @@ rc-service frog-soc status || rollback
 if command -v logrotate >/dev/null 2>&1 && [ -f "$STAGE/frog-soc.logrotate" ]; then
     cp "$STAGE/frog-soc.logrotate" /etc/logrotate.d/frog-soc
 fi
-printf 'Frog SOC 6.0 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
+printf 'Frog SOC 6.1 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
 DEPLOY
 cat > "$STAGE/frog-soc.logrotate" <<'ROTATION'
 /var/log/endlessh.log /var/log/frog-soc.log {

@@ -27,11 +27,11 @@ class ExpansionTests(unittest.TestCase):
     def test_hub_six_profiles_and_capture_origin(self):
         hub=self.get('/')
         for profile in self.app.CONFIG['honeypots']['enabled']:
-            self.assertIn('/traps/'+profile,hub)
-            page=self.get('/traps/'+profile)
-            self.assertIn('action="/traps/'+profile+'/login"',page)
+            self.assertIn(self.app.TRAP_PATHS[profile],hub)
+            page=self.get(self.app.TRAP_PATHS[profile])
+            self.assertIn('action="'+self.app.TRAP_LOGIN_PATHS[profile]+'"',page)
             data=urllib.parse.urlencode({'username':'synthetic','password':'example'}).encode()
-            with urllib.request.urlopen(urllib.request.Request(self.base+'/traps/'+profile+'/login',data=data)) as response:
+            with urllib.request.urlopen(urllib.request.Request(self.base+self.app.TRAP_LOGIN_PATHS[profile],data=data)) as response:
                 self.assertIn('Sign-in failed',response.read().decode())
         with self.app.credentials_connect() as c:
             self.assertEqual({row[0] for row in c.execute('SELECT DISTINCT profile FROM submissions')},set(self.app.TRAP_PROFILES))
@@ -46,6 +46,17 @@ class ExpansionTests(unittest.TestCase):
         self.app.CREDENTIALS_DB=str(old)
         with self.app.credentials_connect() as c:
             self.assertEqual(c.execute('SELECT id,username,password,profile FROM submissions').fetchone(),(9,'legacy-user','synthetic-password','router'))
+
+    def test_public_ssh_card_is_neutral_and_configurable(self):
+        hub=self.get('/')
+        self.assertIn('SSH Access',hub)
+        self.assertIn('ssh -p '+str(self.app.ENDLESSH_PORT)+' 127.0.0.1',hub)
+        self.assertEqual(self.app.public_host('evil;command'),'SERVER_ADDRESS')
+        self.assertEqual(self.app.public_host('example.org:31888'),'example.org')
+        for marker in ('Endlessh','honeypot','pułapka','Frog SOC','/soc','/traps'):
+            self.assertNotIn(marker,hub)
+        self.app.CONFIG['honeypots']['ssh_public_port']=22222
+        self.assertIn('ssh -p 22222',self.get('/'))
 
     def test_disabled_profile_and_single_homepage(self):
         self.app.CONFIG['honeypots']['enabled']=['nas']

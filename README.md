@@ -1,4 +1,4 @@
-# 🐸 Frog SOC 6.0
+# 🐸 Frog SOC 6.1
 
 **Polski** · [English](README.en.md)
 
@@ -10,6 +10,19 @@ dla Alpine/OpenRC; aplikację można uruchomić również na innych dystrybucjac
 
 Frog obserwuje i alarmuje. Nie blokuje IP, nie zastępuje firewalla ani SIEM.
 
+## Co nowego w 6.1
+
+Publiczne linki i formularze korzystają ze zwykłych adresów usług, bez prefiksu
+`/traps`. Stare adresy pozostają aliasami dla zgodności.
+
+Publiczny portal zawiera neutralną kartę **SSH Access**, numer portu i przykład
+`ssh -p PORT ADRES` (adres pochodzi z hosta otwartej strony). Nie ujawnia nazwy Endlessh, przeznaczenia
+pułapki ani linków do panelu SOC. Oznaczenia i historia są w chronionym panelu.
+`honeypots.ssh_public_port` ustawia port pokazywany publicznie; wartość `0`
+(domyślna) używa `endlessh_port`. Przy NAT wpisz tu faktyczny port publiczny.
+Nie przestawia to nasłuchu ani przekierowań. Przykładowe porty z dokumentacji
+należy dopasować do swojego hostingu.
+
 ## Co nowego w 6.0
 
 ### Więcej pułapek, odkrywanych ze strony głównej
@@ -18,14 +31,15 @@ Publiczna strona `/` to portal z linkami do sześciu niezależnych profili:
 
 | Ścieżka | Pułapka |
 | --- | --- |
-| `/traps/router` | Zarządzanie routerem |
-| `/traps/camera` | Konsola kamery IP |
-| `/traps/nas` | Pamięć sieciowa / NAS |
-| `/traps/admin` | Panel administracyjny |
-| `/traps/wordpress` | Panel publikowania strony |
-| `/traps/api` | Konsola integracji API |
+| `/router` | Zarządzanie routerem |
+| `/camera` | Konsola kamery IP |
+| `/storage` | Pamięć sieciowa / NAS |
+| `/console` | Panel administracyjny |
+| `/wp-admin` | Panel publikowania strony |
+| `/api` | Konsola integracji API |
 
-Każdy profil ma własny formularz pod `/traps/PROFIL/login`. Nie udostępnia
+Formularze wysyłają dane pod `/router/login`, `/camera/login`, `/storage/login`,
+`/console/login`, `/wp-login.php` i `/api/login`. Nie udostępniają
 prawdziwego logowania, plików, streamingu ani wykonywania poleceń. Zapisane
 formularze mają teraz oznaczenie pułapki. Stare wpisy są oznaczane jako router.
 Dodatkowe przynęty `/.env`, `/.git/config`, `/backup.zip`, `/config.json`
@@ -381,7 +395,7 @@ Można też użyć pojedynczego, generowanego skryptu:
 sudo sh update-frog-soc-4.sh
 ```
 
-Nazwa została zachowana dla zgodności; skrypt wdraża **6.0** i korzysta z tej
+Nazwa została zachowana dla zgodności; skrypt wdraża **6.1** i korzysta z tej
 samej procedury backupu i kontroli co `deploy/deploy.sh`.
 
 ## Dostęp i widoki
@@ -521,7 +535,7 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-47 testów obejmuje import i rotację logów, sesje IPv6, filtry/CSV,
+48 testów obejmuje import i rotację logów, sesje IPv6, filtry/CSV,
 walidację konfiguracji, trwałość wyciszenia i XP, backup SQLite oraz
 prawdziwe żądania HTTP z autoryzacją, nowe pułapki, demo bez odczytu bazy,
 mapę, profile botów, reguły, testy usług, statystyki i wzorce prób, harmonogram
