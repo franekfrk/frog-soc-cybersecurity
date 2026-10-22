@@ -1,13 +1,119 @@
-# 🐸 Frog SOC 5.2
+# 🐸 Frog SOC 6.0
 
 **Polski** · [English](README.en.md)
 
-Lekki panel cyberlaboratorium dla **Alpine Linux / OpenRC**: monitoring VPS,
+Lekki panel cyberlaboratorium dla **Linuxa z Pythonem 3**: monitoring VPS,
 pułapka HTTP, historia osobnego honeypota SSH **Endlessh**, wspólna oś zdarzeń,
 alerty Discord i cyberżaba zdobywająca XP. Python i biblioteka standardowa;
-bez pip, Node.js i Dockera.
+bez pip, Node.js i Dockera. Gotowe skrypty instalacji i aktualizacji są obecnie
+dla Alpine/OpenRC; aplikację można uruchomić również na innych dystrybucjach Linux.
 
 Frog obserwuje i alarmuje. Nie blokuje IP, nie zastępuje firewalla ani SIEM.
+
+## Co nowego w 6.0
+
+### Więcej pułapek, odkrywanych ze strony głównej
+
+Publiczna strona `/` to portal z linkami do sześciu niezależnych profili:
+
+| Ścieżka | Pułapka |
+| --- | --- |
+| `/traps/router` | Zarządzanie routerem |
+| `/traps/camera` | Konsola kamery IP |
+| `/traps/nas` | Pamięć sieciowa / NAS |
+| `/traps/admin` | Panel administracyjny |
+| `/traps/wordpress` | Panel publikowania strony |
+| `/traps/api` | Konsola integracji API |
+
+Każdy profil ma własny formularz pod `/traps/PROFIL/login`. Nie udostępnia
+prawdziwego logowania, plików, streamingu ani wykonywania poleceń. Zapisane
+formularze mają teraz oznaczenie pułapki. Stare wpisy są oznaczane jako router.
+Dodatkowe przynęty `/.env`, `/.git/config`, `/backup.zip`, `/config.json`
+zwracają wyłącznie przygotowane, fikcyjne dane — nigdy pliki VPS.
+`/backup.zip` jest tekstową atrapą listy kopii, nie archiwum.
+
+Wszystko działa na **jednym porcie HTTP Frog**. Nie trzeba wystawiać sześciu
+nowych portów; Endlessh nadal korzysta ze swojego osobnego portu TCP.
+Przykładowa konfiguracja:
+
+```json
+{
+  "honeypots": {
+    "enabled": ["router", "camera", "nas", "admin", "wordpress", "api"],
+    "homepage": "hub"
+  },
+  "health_checks": {
+    "gatus_url": "http://127.0.0.1:21888/health",
+    "timeout_seconds": 2,
+    "interval_seconds": 30,
+    "endlessh_stale_seconds": 120
+  },
+  "demo_enabled": true
+}
+```
+
+`homepage` może być `hub` albo nazwą włączonego profilu. Port Gatus **21888
+jest również przykładem z VPS autora** — wpisz własny endpoint lub pusty ciąg,
+aby pominąć test HTTP Gatus. Wyłączenie profilu usuwa jego link i trasę.
+Legacy `/admin`, `/login`, `/cgi-bin/luci` nadal kierują do routera, a
+`/wp-login.php`, `/camera`, `/nas`, `/api/login` mają odpowiednie aliasy.
+
+### Profile botów i rozpoznawanie skanowania
+
+`/ip?ip=ADRES` łączy HTTP, Endlessh, nieudane logowania i informację o wysłanych
+formularzach bez pokazywania ich treści. Pokazuje do 200 ostatnich zdarzeń,
+User-Agent, pułapkę i odstępy między żądaniami HTTP. Przerwa ponad 30 minut
+rozdziela wizyty w dostępnym wycinku. Jeden IP może reprezentować wiele urządzeń.
+User-Agent jest deklaracją klienta i może być podrobiony; zbierany jest od tej
+wersji, maks. 300 znaków, bez cookies i nagłówka Authorization.
+
+Etykiety rozpoznają ścieżki WordPressa, konfiguracji, Git, kopii zapasowych,
+routera/CGI, kamery, NAS i API. Każda pokazuje przyczynę i przykładowe ścieżki.
+Samo dopasowanie etykiety nie jest dowodem ataku.
+
+### Reguły z panelu
+
+`/rules` pozwala dodawać, edytować, wyłączać i usuwać do 25 reguł bez edycji
+Pythona i restartu. Reguły są w SQLite, objęte backupem telemetrii; nie są
+kopiowane do `config.json`. Zmiany wymagają POST i podpisanego tokenu.
+
+- `path`: liczba żądań jednego IP dla dokładnej ścieżki lub prefiksu z końcowym `*`.
+- `panels`: liczba różnych profili pułapek odwiedzonych przez jeden IP.
+
+Przykłady: `/backup.zip` co najmniej raz w 60 s; 5 różnych paneli w 60 s.
+Okno może wynosić 1–86400 s. Powiadomienia korzystają z istniejącego worker'a
+alertów i wyciszenia per reguła; zawierają do 5 przykładowych IP, bez haseł.
+Formularze reguł nie wykonują regexów, kodu ani poleceń systemowych.
+
+### Rzeczywiste testy usług
+
+`/healthchecks` pokazuje co 30 s: odpowiedź `/health` Frog, HTTP Gatus,
+BackendState/adres/online Tailscale oraz nasłuch i świeżość poprawnego odczytu
+logów Endlessh. Odczyt logu jest sprawdzany nawet przy braku nowych połączeń;
+stary czas modyfikacji pustego logu sam w sobie nie oznacza awarii.
+Nie otwieramy testowych sesji Endlessh. Wyniki zastępują proste wykrywanie
+procesów w centrum i w alertach wymaganych usług.
+
+To testy konkretnego zakresu: HTTP 200 Gatus nie potwierdza sprawności wszystkich
+jego endpointów, a status Tailscale nie jest pingiem do każdego peera.
+
+### Mapa świata i demonstracja
+
+![Podgląd mapy demonstracyjnej](docs/demo-map.png)
+
+`/geo` ma lokalne kontury 177 państw z Natural Earth, wybór dnia, grupowanie
+punktów w komórkach 5°, suwak godzin i odtwarzanie dnia. Dane odświeżają się
+w tle co 30 s, bez zerowania suwaka. Godziny dotyczą strefy serwera;
+powtórzona godzina zmiany czasu jest grupowana razem. Limit: 5000 grup IP/godzina.
+Widoczne są tylko zdarzenia HTTP, których IP ma już wpis geolokalizacji.
+Kontury nie wymagają kafelków ani CDN; geolokalizacja nadal używa `ipwho.is`
+zgodnie z konfiguracją. Źródło i warunki mapy: `THIRD_PARTY.md`.
+
+Publiczne `/demo` i `/demo/data` korzystają wyłącznie z fikcyjnych danych oraz
+adresów dokumentacyjnych. Nie czytają bazy produkcyjnej, nie zapisują odwiedzin
+ani formularzy i nie udostępniają operacji administracyjnych. Można pokazać demo
+bez ujawniania historii VPS; dostęp sieciowy nadal zależy od wystawionego portu.
+Wyłączenie: `demo_enabled: false`. Demo nie jest linkowane z portalu pułapek.
 
 ## Co nowego w 5.2
 
@@ -122,7 +228,7 @@ potrzebna jest działająca instancja Endlessh **z włączonym logowaniem**.
 
 ## Wymagania
 
-- Alpine Linux z OpenRC.
+- Linux z `/proc`; dla gotowych skryptów: Alpine Linux z OpenRC.
 - Python 3 z `sqlite3` (testowane na Python 3.12 i 3.14).
 - `/proc` do odczytu pamięci, procesów i portów.
 - Root/sudo do instalacji, odczytu logów i restartowania usług.
@@ -210,14 +316,52 @@ z tunelu SSH, usuń go z `required_services`.
 Instalator od zera jest sprawdzany składniowo; wdrożenie na istniejącym VPS
 odbywa się aktualizatorem opisanym poniżej.
 
+## Inne dystrybucje Linux: uruchomienie z systemd
+
+Sama aplikacja wymaga Pythona 3 z `sqlite3`, dostępu do `/proc`, logów i
+zapisu w katalogu danych — nie zależy od `apk` ani OpenRC. **Automatyczne
+`install.sh`, `deploy/deploy.sh` i pojedynczy aktualizator są nadal dla
+Alpine/OpenRC.** Poniżej przykład nowej, ręcznej instalacji na systemd;
+nie nadpisuj istniejących ustawień i hasła podczas aktualizacji.
+
+Zainstaluj Python 3 i osobno Endlessh pakietami swojej dystrybucji, następnie:
+
+```sh
+sudo mkdir -p /opt/frog-soc
+sudo cp deploy/app.py deploy/features.js deploy/world.svg /opt/frog-soc/
+sudo install -m 600 deploy/config.example.json /opt/frog-soc/config.json
+sudoedit /opt/frog-soc/config.json
+sudo python3 - <<'PYTHON'
+import getpass, pathlib
+first = getpass.getpass('Hasło panelu (min. 12 znaków): ')
+second = getpass.getpass('Powtórz hasło: ')
+if len(first) < 12 or first != second:
+    raise SystemExit('Hasła różne lub za krótkie')
+p = pathlib.Path('/opt/frog-soc/.soc-password')
+p.touch(mode=0o600)
+p.write_text(first + '\n')
+p.chmod(0o600)
+PYTHON
+sudo cp deploy/frog-soc.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now frog-soc
+```
+
+Szablon uruchamia aplikację jako root do odczytu chronionych logów i `/proc`.
+Sprawdzenie: `systemctl status frog-soc`, logi: `journalctl -u frog-soc`.
+Endlessh, Tailscale, porty, firewall i plik logu Endlessh skonfiguruj osobno.
+Aktualizacje ręczne wymagają kopii aplikacji/konfiguracji i backupu SQLite
+oraz restartu `systemctl restart frog-soc`. Plik unit jest szablonem;
+nie był instalowany na VPS autora, który używa Alpine/OpenRC.
+
 ## Aktualizacja istniejącej instalacji
 
 Wymagane: `/opt/frog-soc/app.py`, `.soc-password` i usługa `frog-soc`.
 
 ```sh
-scp -r deploy UZYTKOWNIK@VPS:~/frog-update-v52
+scp -r deploy UZYTKOWNIK@VPS:~/frog-update-v6
 ssh UZYTKOWNIK@VPS
-sudo sh ~/frog-update-v52/deploy.sh
+sudo sh ~/frog-update-v6/deploy.sh
 ```
 
 Dla innego portu administracyjnego użyj `scp -P PORT` / `ssh -p PORT` albo
@@ -225,7 +369,7 @@ swojego aliasu SSH. Wysyłaj katalog pod nową nazwą, jeśli docelowy już istn
 żeby `scp -r` nie utworzył dodatkowego poziomu `deploy/`.
 
 Aktualizator zachowuje hasło i konfigurację, robi backup aplikacji oraz spójną
-kopię SQLite w `/opt/frog-soc/backups/v5-DATA-CZAS/`, podmienia aplikację,
+kopię SQLite w `/opt/frog-soc/backups/v6-DATA-CZAS/`, podmienia aplikację,
 restartuje Frog i sprawdza autoryzowane widoki, CSV, JS oraz błędne filtry.
 Przy błędzie restartu/HTTP przywraca poprzednią aplikację i istniejącą wcześniej
 konfigurację. Kopia bazy pozostaje do ręcznego przywrócenia; nowe tabele nie są
@@ -237,7 +381,7 @@ Można też użyć pojedynczego, generowanego skryptu:
 sudo sh update-frog-soc-4.sh
 ```
 
-Nazwa została zachowana dla zgodności; skrypt wdraża **5.2** i korzysta z tej
+Nazwa została zachowana dla zgodności; skrypt wdraża **6.0** i korzysta z tej
 samej procedury backupu i kontroli co `deploy/deploy.sh`.
 
 ## Dostęp i widoki
@@ -270,6 +414,9 @@ Następnie otwórz `http://127.0.0.1:8080/soc`.
 | `/campaigns` | Podobne wzorce prób z różnych IP |
 | `/reports` | Podgląd i stan raportu dziennego Discord |
 | `/credentials` | Loginy i hasła wpisane do fałszywego panelu routera |
+| `/rules` | Reguły obserwacji zarządzane z panelu |
+| `/healthchecks` | Rzeczywiste testy usług |
+| `/demo` | Publiczny pokaz z fikcyjnymi danymi |
 | `/settings` | Konfiguracja, stan odczytu logów, backupu i utrzymania |
 | `/stats` | Ostatnie HTTP i rankingi z bufora; licznik godzinowy z SQLite |
 | `/history` | Godzinowa historia HTTP 48 h |
@@ -374,9 +521,10 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-33 testy obejmują import i rotację logów, sesje IPv6, filtry/CSV,
+47 testów obejmuje import i rotację logów, sesje IPv6, filtry/CSV,
 walidację konfiguracji, trwałość wyciszenia i XP, backup SQLite oraz
-prawdziwe żądania HTTP z autoryzacją, statystyki i wzorce prób, harmonogram
+prawdziwe żądania HTTP z autoryzacją, nowe pułapki, demo bez odczytu bazy,
+mapę, profile botów, reguły, testy usług, statystyki i wzorce prób, harmonogram
 raportów oraz usuwanie wpisów z tokenem i potwierdzeniem. Test HTTP wymaga możliwości otwarcia
 lokalnego gniazda TCP.
 

@@ -14,6 +14,7 @@ class EndlesshTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = pathlib.Path(temp.name)
         self.app.DB = str(self.root / 'history.sqlite3')
+        self.app.ASSET_DIR = str(script.parent/'deploy')
         self.log = self.root / 'endlessh.log'
         self.app.ENDLESSH_LOGS = (str(self.root / '*.log*'),)
 

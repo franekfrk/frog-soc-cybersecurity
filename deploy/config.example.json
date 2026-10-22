@@ -59,5 +59,23 @@
     "window_hours": 24,
     "min_ips": 2,
     "min_attempts": 3
-  }
+  },
+  "honeypots": {
+    "enabled": [
+      "router",
+      "camera",
+      "nas",
+      "admin",
+      "wordpress",
+      "api"
+    ],
+    "homepage": "hub"
+  },
+  "health_checks": {
+    "gatus_url": "http://127.0.0.1:21888/health",
+    "timeout_seconds": 2,
+    "interval_seconds": 30,
+    "endlessh_stale_seconds": 120
+  },
+  "demo_enabled": true
 }

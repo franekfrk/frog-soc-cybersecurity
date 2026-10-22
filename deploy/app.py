@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frog SOC 5.2; stdlib-only Alpine/OpenRC mini SOC."""
+"""Frog SOC 6.0; stdlib-only Alpine/OpenRC mini SOC."""
 import base64
 import collections
 import copy
@@ -28,7 +28,7 @@ import threading
 import time
 from urllib.parse import urlsplit, parse_qs, urlencode
 
-VERSION = '5.2'
+VERSION = '6.0'
 DEFAULT_CONFIG = {
     'capture_credentials': True, 'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
     'endlessh_logs': ['/var/log/endlessh.log*'],
@@ -44,7 +44,10 @@ DEFAULT_CONFIG = {
                   'endlessh_rows': 100000, 'auth_days': 30, 'credentials_days': 7, 'credentials_rows': 10000},
     'maintenance': {'interval_seconds': 3600, 'backup_hours': 24, 'backup_keep': 7},
     'daily_report': {'enabled': True, 'hour': 20, 'minute': 0},
-    'campaigns': {'window_hours': 24, 'min_ips': 2, 'min_attempts': 3}
+    'campaigns': {'window_hours': 24, 'min_ips': 2, 'min_attempts': 3},
+    'honeypots': {'enabled': ['router', 'camera', 'nas', 'admin', 'wordpress', 'api'], 'homepage': 'hub'},
+    'health_checks': {'gatus_url': 'http://127.0.0.1:21888/health', 'timeout_seconds': 2, 'interval_seconds': 30, 'endlessh_stale_seconds': 120},
+    'demo_enabled': True
 }
 ROOT = os.environ.get('FROG_ROOT', '/opt/frog-soc')
 CONFIG_PATH = os.environ.get('FROG_CONFIG', ROOT + '/config.json')
@@ -88,6 +91,17 @@ def load_config(path):
     for key,value in config['campaigns'].items():
         if value < (2 if key == 'min_ips' else 1):
             raise ValueError('campaigns.'+key+': zbyt mała wartość')
+    profiles={'router','camera','nas','admin','wordpress','api'}
+    if not all(isinstance(v,str) for v in config['honeypots']['enabled']) or not set(config['honeypots']['enabled']) <= profiles or not config['honeypots']['enabled'] or len(set(config['honeypots']['enabled']))!=len(config['honeypots']['enabled']):
+        raise ValueError('Nieprawidłowe profile pułapek')
+    if config['honeypots']['homepage'] not in ['hub']+config['honeypots']['enabled']:
+        raise ValueError('Nieprawidłowa strona główna pułapki')
+    for key in ('timeout_seconds','interval_seconds','endlessh_stale_seconds'):
+        if not 1 <= config['health_checks'][key] <= 3600:
+            raise ValueError('Nieprawidłowy interwał health_checks')
+    url=config['health_checks']['gatus_url']
+    if url and (urlsplit(url).scheme not in ('http','https') or not urlsplit(url).hostname or urlsplit(url).username or len(url)>512):
+        raise ValueError('Nieprawidłowy gatus_url')
     for key in ('ram_percent', 'disk_percent'):
         if config['alerts'][key] > 100:
             raise ValueError(key+': maksimum 100')
@@ -124,6 +138,9 @@ MAINTENANCE_ERROR = ''
 AUTH_ERROR = ''
 CSRF_KEY = secrets.token_bytes(32)
 REPORT_LOCK = threading.Lock()
+HEALTH_LOCK = threading.Lock()
+HEALTH_STATE = {}
+ASSET_DIR = os.path.dirname(globals().get('__file__', ROOT+'/app.py'))
 
 
 class SOCConnection(sqlite3.Connection):
@@ -153,6 +170,8 @@ def db_connect():
     c.execute('CREATE INDEX IF NOT EXISTS auth_ts ON auth_events(ts)')
     c.execute('CREATE INDEX IF NOT EXISTS endlessh_ip ON endlessh_sessions(ip, started)')
     c.execute('CREATE INDEX IF NOT EXISTS events_ip ON events(ip, ts)')
+    c.execute('CREATE TABLE IF NOT EXISTS http_details (event_id INTEGER PRIMARY KEY, user_agent TEXT, profile TEXT, scan_label TEXT)')
+    c.execute('CREATE TABLE IF NOT EXISTS watch_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, kind TEXT, path TEXT, window_seconds INTEGER, threshold INTEGER, enabled INTEGER)')
     return c
 
 
@@ -213,7 +232,7 @@ def webhooks_notify(content):
         if not url.startswith('https://discord.com/api/webhooks/') and not url.startswith('https://discordapp.com/api/webhooks/'):
             return
         body = json.dumps({'content': content[:1800], 'allowed_mentions': {'parse': []}}).encode()
-        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/5.2'}, method='POST')
+        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.0'}, method='POST')
         with urllib.request.urlopen(req, timeout=6) as r:
             r.read(128)
         return True
@@ -247,7 +266,7 @@ def geo_lookup(ip):
                     old = c.execute('SELECT checked FROM geo WHERE ip=?',(safe_ip,)).fetchone()
                     if old and time.time()-old[0] < GEO_REFRESH: return
             # Third party geo service receives the public attacker IP; not credentials.
-            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/5.2'})
+            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.0'})
             with urllib.request.urlopen(req,timeout=3) as r:
                 data = json.load(r)
             if not data.get('success'): return
@@ -442,7 +461,7 @@ def load_events():
             pass
 
 
-def log_event(ip, path, method):
+def log_event(ip, path, method, user_agent='', profile=''):
     event = {'ts': int(time.time()), 'ip': ip, 'path': path[:150], 'method': method[:16]}
     with LOCK:
         EVENTS.append(event)
@@ -456,7 +475,8 @@ def log_event(ip, path, method):
     try:
         with DB_LOCK:
             with db_connect() as c:
-                c.execute('INSERT INTO events VALUES (?,?,?,?)', (event['ts'], event['ip'], event['path'], event['method']))
+                cursor = c.execute('INSERT INTO events VALUES (?,?,?,?)', (event['ts'], event['ip'], event['path'], event['method']))
+                c.execute('INSERT OR REPLACE INTO http_details VALUES (?,?,?,?)', (cursor.lastrowid, clean_agent(user_agent), profile[:32], scan_classification(path)[0]))
                 meta_increment(c, 'http_lifetime')
     except sqlite3.Error:
         pass
@@ -578,6 +598,12 @@ def snapshot():
         'listen_ports': sorted(ports)[:40],
         'endlessh_connections': established[ENDLESSH_PORT],
     }
+    with HEALTH_LOCK:
+        checks = dict(HEALTH_STATE)
+    for service in result['services']:
+        check=checks.get(service['name'])
+        if check and check['ok'] is not None:
+            service.update(ok=check['ok'],detail=check['detail'])
     with LOCK:
         CACHE.update(at=now, data=result)
     return result
@@ -692,8 +718,8 @@ def duration(sec):
 def layout(title, content):
     return ("<!doctype html><html lang='pl'><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<script defer src='/assets/live.js'></script>"
-        "<title>Frog SOC 5.2 — " + esc(title) + "</title><style>"
+        "<script defer src='/assets/live.js'></script><script defer src='/assets/features.js'></script>"
+        "<title>Frog SOC 6.0 — " + esc(title) + "</title><style>"
         ":root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#020d11;color:#c8ffe0;"
         "font:15px system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:20px}"
         "h1{font-size:27px;margin:12px 0}h2{font-size:17px;margin:0 0 14px}"
@@ -705,9 +731,9 @@ def layout(title, content):
         "td,th{padding:9px;border-bottom:1px solid #28403b;text-align:left;word-break:break-word}"
         "progress{width:100%;height:12px;accent-color:#80f7bc}code{color:#b9fad2}"
         "input,select,button{font:inherit;padding:9px;border-radius:6px;max-width:100%;background:#102c30;color:#dcffe9;border:1px solid #39665b}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}label{display:grid;gap:5px}nav{display:flex;flex-wrap:wrap;gap:8px}svg{max-width:100%}@media(max-width:600px){main{padding:10px}td,th{padding:7px}h1{font-size:22px}.grid{grid-template-columns:1fr}}"
-        "</style><main><nav><b>🐸 FROG SOC 5.2</b> &nbsp; "
+        "</style><main><nav><b>🐸 FROG SOC 6.0</b> &nbsp; "
         "<a href='/soc'>Centrum</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
-        "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/credential-stats'>Statystyki logowania</a><a href='/campaigns'>Wzorce botów</a><a href='/reports'>Raport dzienny</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
+        "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/credential-stats'>Statystyki logowania</a><a href='/campaigns'>Wzorce botów</a><a href='/reports'>Raport dzienny</a><a href='/rules'>Reguły</a><a href='/healthchecks'>Sprawność usług</a><a href='/demo'>Demo</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
         "</article><p class='muted' id='live-status'>Aktualizacja w tle · dostęp Tailscale/localhost + hasło</p>"
         "</main></html>")
 
@@ -796,7 +822,7 @@ def old_frog():
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = 'FrogSOC/5.2'
+    server_version = 'FrogSOC/6.0'
     def log_message(self, *args):
         pass
 
@@ -809,7 +835,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
         if headers:
             for k, v in headers.items():
                 self.send_header(k, v)
@@ -838,7 +864,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.route()
 
-    def capture_form(self):
+    def capture_form(self, profile='router'):
         if not CONFIG['capture_credentials']:
             return True
         if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
@@ -870,7 +896,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.connection.settimeout(old_timeout)
         if 'username' in fields or 'password' in fields:
             try:
-                save_credentials(self.client_address[0], fields.get('username', [''])[0], fields.get('password', [''])[0])
+                save_credentials(self.client_address[0], fields.get('username', [''])[0], fields.get('password', [''])[0], profile)
             except (OSError, sqlite3.Error):
                 logging.error('Nie udało się zapisać formularza honeypota')
                 self.send(503, 'Spróbuj ponownie później.', 'text/plain; charset=utf-8')
@@ -906,13 +932,64 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self.send(303, '', headers={'Location': '/credentials?deleted='+str(count)})
 
+    def save_rule(self):
+        if self.command!='POST':
+            self.send(405,'Wymagane POST.','text/plain; charset=utf-8',{'Allow':'POST'})
+            return
+        try:
+            if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length',[]))!=1 or self.headers.get_content_type()!='application/x-www-form-urlencoded':
+                raise ValueError('Nieprawidłowy formularz')
+            length=int(self.headers['Content-Length'])
+            if not 0<=length<=16384: raise ValueError('Za duży formularz')
+            old=self.connection.gettimeout()
+            try:
+                self.connection.settimeout(3);body=self.rfile.read(length)
+            finally:
+                self.connection.settimeout(old)
+            if len(body)!=length: raise ValueError('Niekompletny formularz')
+            fields=parse_qs(body.decode('utf-8','strict'),keep_blank_values=True,max_num_fields=32)
+            change_rule(fields)
+        except PermissionError:
+            self.send(403,'Formularz wygasł. Odśwież stronę.','text/plain; charset=utf-8');return
+        except (OSError,ValueError,UnicodeError) as exc:
+            self.send(400,layout('Nieprawidłowa reguła','<p>'+esc(exc)+'</p>'));return
+        self.send(303,'',headers={'Location':'/rules?saved=1'})
+
     def route(self):
         path = urlsplit(self.path).path
-        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/credentials', '/credentials/delete', '/credential-stats', '/campaigns', '/reports', '/assets/live.js'):
+        if path in ('/assets/features.js','/assets/world.svg'):
+            name='features.js' if path.endswith('.js') else 'world.svg'
+            try:
+                with open(os.path.join(ASSET_DIR,name),encoding='utf-8') as source:
+                    self.send(200, source.read(), 'application/javascript; charset=utf-8' if name.endswith('.js') else 'image/svg+xml')
+            except OSError:
+                self.send(503, 'Brak zasobów aplikacji.', 'text/plain; charset=utf-8')
+            return
+        if path in ('/demo','/demo/data'):
+            if not CONFIG['demo_enabled']:
+                self.send(404, 'Demo wyłączone.', 'text/plain; charset=utf-8')
+            elif path=='/demo/data':
+                self.send(200,json.dumps(demo_data()),'application/json; charset=utf-8')
+            else:
+                self.send(200,demo_page())
+            return
+        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/credentials', '/credentials/delete', '/credential-stats', '/campaigns', '/reports', '/rules', '/rules/save', '/healthchecks', '/geo/data', '/assets/live.js'):
             if not self.authorized():
                 return
             params = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
             try:
+                if path == '/rules/save':
+                    self.save_rule()
+                    return
+                if path in ('/rules','/healthchecks'):
+                    self.send(200, rules_page(params) if path=='/rules' else health_page())
+                    return
+                if path == '/geo/data':
+                    self.send(200,json.dumps(map_data(params.get('day',''))),'application/json; charset=utf-8')
+                    return
+                if path == '/geo':
+                    self.send(200,map_page(params.get('day','')))
+                    return
                 if path == '/credentials/delete':
                     self.delete_submissions()
                     return
@@ -949,19 +1026,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == '/health':
             self.send(200, 'ok', 'text/plain; charset=utf-8')
             return
-        if self.command == 'POST' and path in ('/', '/admin', '/login', '/cgi-bin/luci'):
-            if not self.capture_form():
+        profile = trap_profile(path)
+        if self.command == 'POST' and profile:
+            if not self.capture_form(profile):
                 return
-        log_event(self.client_address[0], path, self.command)
-        if path in ('/', '/admin', '/login', '/cgi-bin/luci'):
-            self.send(200, '<!doctype html><meta charset="utf-8"><title>Router Management</title>'
-                      '<h2>Administrator login</h2><form method="post" action="/login">'
-                      '<input name="username" placeholder="Username">'
-                      '<input type="password" name="password" placeholder="Password">'
-                      '<button>Sign in</button></form>')
+        log_event(self.client_address[0], path, self.command, self.headers.get('User-Agent',''), profile or '')
+        if path=='/':
+            self.send(200, trap_hub() if CONFIG['honeypots']['homepage']=='hub' else trap_page(CONFIG['honeypots']['homepage']))
+        elif profile:
+            self.send(200, trap_page(profile, failed=self.command=='POST'))
+        elif path in ('/.env','/.git/config','/backup.zip','/config.json'):
+            self.send(200, decoy_file(path), 'text/plain; charset=utf-8')
         else:
             self.send(404, '<!doctype html><title>404</title><h2>404 Not Found</h2>')
-        # Only known honeypot forms are collected; administration credentials are never stored.
+
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -1122,7 +1200,7 @@ def ip_page(ip):
             http = c.execute('SELECT COUNT(*),MIN(ts),MAX(ts) FROM events WHERE ip IN ('+placeholders+')',variants).fetchone()
             auth = c.execute('SELECT COUNT(*) FROM auth_events WHERE ip IN ('+placeholders+')',variants).fetchone()[0]
     count, first, last, seconds, longest = summary
-    return layout('Adres IP · '+canonical_ip(ip), '<section class="box"><p>Sesje Endlessh: <b>'+str(count)+'</b> · HTTP: <b>'+str(http[0])+'</b> · błędy SSH: <b>'+str(auth)+'</b></p><p>Pierwsza sesja: '+stamp(first)+' · ostatnia: '+stamp(last)+'</p><p>Łączny czas zakończonych sesji: %.3f s · najdłuższa: %.3f s</p>' % (seconds or 0,longest or 0)+'<a href="/ssh?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wszystkie zachowane sesje tego IP</a> · <a href="/activity?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wspólna oś aktywności IP</a><p class="muted">Podsumowanie dotyczy danych dostępnych w okresie retencji.</p></section>')
+    return layout('Adres IP · '+canonical_ip(ip), bot_profile(ip)+ '<section class="box"><p>Sesje Endlessh: <b>'+str(count)+'</b> · HTTP: <b>'+str(http[0])+'</b> · błędy SSH: <b>'+str(auth)+'</b></p><p>Pierwsza sesja: '+stamp(first)+' · ostatnia: '+stamp(last)+'</p><p>Łączny czas zakończonych sesji: %.3f s · najdłuższa: %.3f s</p>' % (seconds or 0,longest or 0)+'<a href="/ssh?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wszystkie zachowane sesje tego IP</a> · <a href="/activity?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wspólna oś aktywności IP</a><p class="muted">Podsumowanie dotyczy danych dostępnych w okresie retencji.</p></section>')
 
 
 def import_auth_logs():
@@ -1208,6 +1286,7 @@ def alert_candidates(s=None):
         result.append(('import:endlessh','Błąd odczytu logów Endlessh: '+ENDLESSH_ERROR))
     if MAINTENANCE_ERROR:
         result.append(('maintenance','Błąd utrzymania / backupu: '+MAINTENANCE_ERROR))
+    result.extend(rule_alerts(now))
     return result
 
 
@@ -1220,7 +1299,7 @@ def dispatch_alerts(alerts, now=None):
     for key,message in current.items():
         active,sent=prior.get(key,(0,0))
         if not active or now-sent>=CONFIG['alerts']['cooldown_seconds']:
-            if webhooks_notify('🚨 **FROG SOC 5.2** | '+message):
+            if webhooks_notify('🚨 **FROG SOC 6.0** | '+message):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('INSERT OR REPLACE INTO alert_state VALUES (?,?,?)',(key,1,now))
@@ -1229,7 +1308,7 @@ def dispatch_alerts(alerts, now=None):
     for key,(active,sent) in prior.items():
         if active and key not in current:
             # Record notices are one-shot observations, not incidents requiring recovery.
-            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 5.2** | Ustąpił alert: '+key):
+            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.0** | Ustąpił alert: '+key):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('UPDATE alert_state SET active=0 WHERE key=?',(key,))
@@ -1248,6 +1327,7 @@ def maintenance_once(now=None):
                 c.execute('DELETE FROM '+table+' WHERE '+column+'<?',(now-days*86400,))
                 if limit:
                     c.execute('DELETE FROM '+table+' WHERE rowid IN (SELECT rowid FROM '+table+' ORDER BY '+column+' DESC LIMIT -1 OFFSET ?)',(limit,))
+            c.execute('DELETE FROM http_details WHERE event_id NOT IN (SELECT rowid FROM events)')
             # Drop old dedup keys only when all source files are consumed; cursor prevents replay.
             c.execute('DELETE FROM endlessh_seen WHERE ts<?',(now-retention['endlessh_days']*86400,))
             c.execute('DELETE FROM geo WHERE checked<?',(now-90*86400,))
@@ -1307,6 +1387,7 @@ def live_script():
 const interval = INTERVAL;
 let busy = false;
 setInterval(async () => {
+  if (document.getElementById('world-map') || location.pathname==='/rules') return;
   if (busy || document.hidden || document.activeElement?.closest('form')) return;
   if (document.querySelector('form[data-dirty]')) return;
   busy = true;
@@ -1350,6 +1431,8 @@ def credentials_connect():
     c.create_function('norm_ip', 1, canonical_ip)
     c.execute('CREATE TABLE IF NOT EXISTS submissions (id INTEGER PRIMARY KEY, ts REAL, ip TEXT, username TEXT, password TEXT)')
     c.execute('CREATE INDEX IF NOT EXISTS submissions_ts ON submissions(ts)')
+    if 'profile' not in {row[1] for row in c.execute('PRAGMA table_info(submissions)')}:
+        c.execute("ALTER TABLE submissions ADD COLUMN profile TEXT NOT NULL DEFAULT 'router'")
     return c
 
 
@@ -1359,10 +1442,10 @@ def prune_credentials(c, now):
     c.execute('DELETE FROM submissions WHERE id IN (SELECT id FROM submissions ORDER BY ts DESC,id DESC LIMIT -1 OFFSET ?)', (retention['credentials_rows'],))
 
 
-def save_credentials(ip, username, password):
+def save_credentials(ip, username, password, profile='router'):
     with DB_LOCK:
         with credentials_connect() as c:
-            c.execute('INSERT INTO submissions (ts,ip,username,password) VALUES (?,?,?,?)', (time.time(),ip,username[:256],password[:512]))
+            c.execute('INSERT INTO submissions (ts,ip,username,password,profile) VALUES (?,?,?,?,?)', (time.time(),ip,username[:256],password[:512],profile[:32]))
             prune_credentials(c, time.time())
 
 
@@ -1379,15 +1462,15 @@ def credentials_page(params=None):
             total = c.execute('SELECT COUNT(*) FROM submissions').fetchone()[0]
             pages = max(1, (total+CONFIG['page_size']-1)//CONFIG['page_size'])
             page = min(page, pages)
-            rows = c.execute('SELECT id,ts,ip,username,password FROM submissions ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?', (CONFIG['page_size'],(page-1)*CONFIG['page_size'])).fetchall()
+            rows = c.execute('SELECT id,ts,ip,username,password,profile FROM submissions ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?', (CONFIG['page_size'],(page-1)*CONFIG['page_size'])).fetchall()
             max_id = c.execute('SELECT COALESCE(MAX(id),0) FROM submissions').fetchone()[0]
     token = deletion_token(max_id)
-    body = ''.join('<tr><td><input type="checkbox" name="id" value="'+str(row_id)+'" aria-label="Zaznacz wpis '+str(row_id)+'"></td><td>'+stamp(ts)+'</td><td>'+ip_link(ip)+'</td><td><code>'+esc(username)+'</code></td><td><details><summary>Pokaż hasło</summary><code>'+esc(password)+'</code></details></td></tr>' for row_id,ts,ip,username,password in rows)
+    body = ''.join('<tr><td><input type="checkbox" name="id" value="'+str(row_id)+'" aria-label="Zaznacz wpis '+str(row_id)+'"></td><td>'+stamp(ts)+'</td><td>'+ip_link(ip)+'</td><td>'+esc(profile)+'</td><td><code>'+esc(username)+'</code></td><td><details><summary>Pokaż hasło</summary><code>'+esc(password)+'</code></details></td></tr>' for row_id,ts,ip,username,password,profile in rows)
     nav = 'Strona '+str(page)+' / '+str(pages)
     if page>1: nav += ' <a href="/credentials?page='+str(page-1)+'">← Nowsze</a>'
     if page<pages: nav += ' <a href="/credentials?page='+str(page+1)+'">Starsze →</a>'
     message = '<p class="ok">Usunięto wpisów: '+str(int(params['deleted']))+'</p>' if params.get('deleted', '').isdigit() else ''
-    return layout('Formularze pułapki', '<section class="box">'+message+'<p>Zbieranie: <b>'+('włączone' if CONFIG['capture_credentials'] else 'wyłączone')+'</b> · wpisy: '+str(total)+'</p><p>Loginy i hasła z fałszywego panelu routera. Retencja: '+str(CONFIG['retention']['credentials_days'])+' dni, maks. '+str(CONFIG['retention']['credentials_rows'])+' wpisów. Osobna baza jest dostępna tylko właścicielowi; nie jest objęta automatycznymi backupami telemetrii.</p><form method="post" action="/credentials/delete"><input type="hidden" name="token" value="'+esc(token)+'"><table><tr><th>Wybór</th><th>Czas</th><th>IP</th><th>Login</th><th>Hasło</th></tr>'+ (body or '<tr><td colspan="5">Brak formularzy</td></tr>')+'</table><label>Potwierdź usunięcie: wpisz USUN<input name="confirm" autocomplete="off"></label><button name="action" value="selected">Usuń zaznaczone</button><button name="action" value="all">Usuń całą historię z chwili otwarcia formularza</button></form><p>Nowe wpisy przechwycone po otwarciu formularza nie zostaną usunięte. Token ważny 30 minut.</p><p>'+nav+'</p></section>')
+    return layout('Formularze pułapki', '<section class="box">'+message+'<p>Zbieranie: <b>'+('włączone' if CONFIG['capture_credentials'] else 'wyłączone')+'</b> · wpisy: '+str(total)+'</p><p>Loginy i hasła z fałszywego panelu routera. Retencja: '+str(CONFIG['retention']['credentials_days'])+' dni, maks. '+str(CONFIG['retention']['credentials_rows'])+' wpisów. Osobna baza jest dostępna tylko właścicielowi; nie jest objęta automatycznymi backupami telemetrii.</p><form method="post" action="/credentials/delete"><input type="hidden" name="token" value="'+esc(token)+'"><table><tr><th>Wybór</th><th>Czas</th><th>IP</th><th>Pułapka</th><th>Login</th><th>Hasło</th></tr>'+ (body or '<tr><td colspan="6">Brak formularzy</td></tr>')+'</table><label>Potwierdź usunięcie: wpisz USUN<input name="confirm" autocomplete="off"></label><button name="action" value="selected">Usuń zaznaczone</button><button name="action" value="all">Usuń całą historię z chwili otwarcia formularza</button></form><p>Nowe wpisy przechwycone po otwarciu formularza nie zostaną usunięte. Token ważny 30 minut.</p><p>'+nav+'</p></section>')
 
 
 def deletion_token(max_id, now=None):
@@ -1567,6 +1650,288 @@ def reports_page():
     return layout('Raport dzienny Discord', '<section class="box"><p>Wysyłka: '+('włączona' if config['enabled'] else 'wyłączona')+' · godzina %02d:%02d' % (config['hour'],config['minute'])+' w strefie serwera. Wymaga skonfigurowanego .discord-webhook.</p><p>Ostatni wysłany dzień: '+esc(last)+' · wysłano: '+stamp(sent or None)+'</p><p>Po udanym wysłaniu stan jest zachowany w SQLite. Błąd dostarczenia powoduje ponowienie za około minutę. Po przestoju wysyłany jest tylko raport za ostatni zakończony dzień; bez nadrabiania całej zaległości.</p><h2>Podgląd za wczoraj</h2><pre>'+esc(daily_report_text(day))+'</pre><p>Raport zawiera tylko podsumowania liczbowe. Nie zawiera haseł ani loginów z pułapki.</p></section>')
 
 
+TRAP_PROFILES = {
+    'router': ('Gateway Manager', 'Network gateway configuration', '🌐'),
+    'camera': ('IP Camera Console', 'Live camera management', '📹'),
+    'nas': ('Storage Station', 'Files and shared volumes', '🗄️'),
+    'admin': ('Administration Console', 'Infrastructure administration', '⚙️'),
+    'wordpress': ('Site Publishing', 'Website publishing console', '📝'),
+    'api': ('Developer API Console', 'API access and integration settings', '🔌')
+}
+
+
+def trap_profile(path):
+    aliases={'/admin':'router','/login':'router','/cgi-bin/luci':'router','/wp-login.php':'wordpress','/wp-admin':'wordpress','/camera':'camera','/nas':'nas','/api/login':'api'}
+    if path=='/':
+        selected=CONFIG['honeypots']['homepage']
+        return None if selected=='hub' else selected
+    if path in aliases:
+        profile=aliases[path]
+        return profile if profile in CONFIG['honeypots']['enabled'] else None
+    match=re.fullmatch(r'/traps/([a-z]+)(?:/login)?/?',path)
+    return match[1] if match and match[1] in CONFIG['honeypots']['enabled'] else None
+
+
+def trap_shell(title, content):
+    return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>body{margin:0;background:#eef2f6;color:#203447;font:16px system-ui}header{background:#203447;color:white;padding:24px}main{max-width:1000px;margin:40px auto;padding:16px}section{background:white;padding:25px;border-radius:10px;border:1px solid #d2dce6}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}a{color:#2261a0}label{display:block;margin:16px 0}input,button{padding:12px;font:inherit;box-sizing:border-box;max-width:100%;border:1px solid #bac8d4;border-radius:5px}input{width:100%}button{background:#2261a0;color:white}form{max-width:400px}small{color:#66798c}</style><header><b>'+esc(title)+'</b></header><main>'+content+'</main></html>'
+
+
+def trap_hub():
+    cards=''.join('<section><h2>'+TRAP_PROFILES[key][2]+' '+TRAP_PROFILES[key][0]+'</h2><p>'+TRAP_PROFILES[key][1]+'</p><a href="/traps/'+key+'">Open console →</a></section>' for key in CONFIG['honeypots']['enabled'])
+    return trap_shell('Device Services Portal','<h1>Available services</h1><p>Select the device or service you want to manage.</p><div class="cards">'+cards+'</div><p><small>Configuration resources: <a href="/config.json">configuration</a> · <a href="/backup.zip">backup inventory</a></small></p>')
+
+
+def trap_page(profile, failed=False):
+    title,subtitle,icon=TRAP_PROFILES[profile]
+    context={
+        'router':'WAN uplink · LAN interfaces · Wireless settings',
+        'camera':'Camera 01 · Video stream unavailable until sign-in',
+        'nas':'Shared folders · Storage pool · User access',
+        'admin':'System status · Maintenance · Access control',
+        'wordpress':'Publishing dashboard · Themes · Site settings',
+        'api':'API keys · Integrations · Request usage'
+    }[profile]
+    return trap_shell(title,'<p><a href="/">← All services</a></p><section><h1>'+icon+' '+esc(title)+'</h1><p>'+esc(subtitle)+'</p><p><small>'+esc(context)+'</small></p>'+('<p role="alert">Sign-in failed. Check your credentials.</p>' if failed else '')+'<form method="post" action="/traps/'+profile+'/login"><label>Username<input name="username" autocomplete="off" maxlength="256"></label><label>Password<input type="password" name="password" autocomplete="off" maxlength="512"></label><button>Sign in</button></form></section>')
+
+
+def decoy_file(path):
+    examples={
+        '/.env':'# Demonstration configuration; no working credentials\nAPP_ENV=staging\nDB_HOST=192.0.2.10\nDB_PASSWORD=DECOY_NOT_A_REAL_SECRET\n',
+        '/.git/config':'[core]\n    repositoryformatversion = 0\n[remote "origin"]\n    url = https://example.invalid/device-config.git\n',
+        '/backup.zip':'Backup inventory (placeholder, not an archive)\nrouter-config.json\ncamera-settings.json\nNo real server files are exposed.\n',
+        '/config.json':'{"environment":"staging","node":"demo-device","api":"https://example.invalid/api"}\n'
+    }
+    return examples[path]
+
+
+def clean_agent(agent):
+    return ''.join(char for char in str(agent) if ord(char)>=32 and ord(char)!=127)[:300]
+
+
+def scan_classification(path):
+    path=path.lower()
+    checks=[
+        ('Pliki konfiguracyjne',('konfiguracja',),lambda p: p.endswith('/.env') or p=='/.env' or p.endswith('/config.json')),
+        ('Repozytorium Git',('metadane Git',),lambda p: '/.git/' in p),
+        ('Kopie zapasowe',('nazwa archiwum',),lambda p: any(p.endswith(ext) for ext in ('.zip','.bak','.sql','.tar.gz'))),
+        ('WordPress',('ścieżka WordPress',),lambda p: 'wp-' in p or '/wordpress' in p),
+        ('Router / CGI',('CGI albo konsola routera',),lambda p: '/cgi-bin/' in p or '/traps/router' in p),
+        ('Kamera IP',('konsola kamery',),lambda p: '/camera' in p),
+        ('NAS',('konsola pamięci sieciowej',),lambda p: '/nas' in p),
+        ('API',('ścieżka API',),lambda p: p.startswith('/api') or '/traps/api' in p),
+        ('Panel administracyjny',('ścieżka logowania',),lambda p: '/admin' in p or '/login' in p)
+    ]
+    for label,reasons,predicate in checks:
+        if predicate(path):
+            return label, reasons[0]
+    return 'Pozostały ruch','brak dopasowania do reguł ścieżek'
+
+
+def observed_ip(ip):
+    try:
+        return canonical_ip(ip)
+    except ValueError:
+        return None
+
+
+def bot_profile(ip):
+    variants=ip_variants(ip);marks=','.join('?' for _ in variants)
+    with DB_LOCK:
+        with db_connect() as c:
+            events=c.execute('SELECT e.ts,e.path,e.method,COALESCE(d.user_agent,\'\'),COALESCE(d.profile,\'\') FROM events e LEFT JOIN http_details d ON d.event_id=e.rowid WHERE e.ip IN ('+marks+') ORDER BY e.ts DESC,e.rowid DESC LIMIT 200',variants).fetchall()
+            ssh=c.execute('SELECT started,seconds FROM endlessh_sessions WHERE ip IN ('+marks+') ORDER BY started DESC LIMIT 30',variants).fetchall()
+            failures=c.execute('SELECT ts FROM auth_events WHERE ip IN ('+marks+') ORDER BY ts DESC LIMIT 30',variants).fetchall()
+    agents=collections.Counter(row[3] for row in events if row[3])
+    reasons=collections.defaultdict(set)
+    for event in events:
+        reasons[scan_classification(event[1])].add(event[1])
+    ordered=list(reversed(events));visits=0;previous=None;steps=[]
+    for ts,path,method,agent,profile in ordered:
+        gap=None if previous is None else ts-previous
+        if gap is None or gap>1800: visits+=1
+        steps.append((ts,'HTTP '+method+' '+path,profile or '—',gap))
+        previous=ts
+    steps.extend((ts,'Endlessh: '+('brak CLOSE' if seconds is None else '%.3f s' % seconds),'SSH',None) for ts,seconds in ssh)
+    steps.extend((ts[0],'Nieudane logowanie sshd/Dropbear','SSH auth',None) for ts in failures)
+    if os.path.exists(CREDENTIALS_DB):
+        with DB_LOCK:
+            with credentials_connect() as c:
+                forms=c.execute('SELECT ts,profile FROM submissions WHERE ip IN ('+marks+') ORDER BY ts DESC LIMIT 30',variants).fetchall()
+        steps.extend((ts,'Wysłany formularz (bez ujawniania treści)',profile,None) for ts,profile in forms)
+    rows=''.join('<tr><td>'+stamp(ts)+'</td><td>'+esc(detail)+'</td><td>'+esc(profile)+'</td><td>'+('—' if gap is None else str(gap)+' s')+'</td></tr>' for ts,detail,profile,gap in sorted(steps,key=lambda row:row[0],reverse=True)[:200])
+    badges=''.join('<li><b>'+esc(label)+'</b>: '+esc(reason)+' · '+', '.join('<code>'+esc(path)+'</code>' for path in sorted(paths)[:5])+'</li>' for (label,reason),paths in sorted(reasons.items()))
+    uas=''.join('<li><code>'+esc(agent)+'</code> · '+str(count)+' żądań</li>' for agent,count in agents.most_common(10))
+    return '<section class="box"><h2>Profil bota i przebieg wizyty</h2><p>Do 200 ostatnich HTTP; wizyty rozdziela przerwa ponad 30 min. W tym wycinku: '+str(visits)+' wizyt. Jeden IP może reprezentować wiele urządzeń, a User-Agent może być podrobiony.</p><h3>Rozpoznane wzorce</h3><ul>'+ (badges or '<li>Brak HTTP</li>')+'</ul><p>Etykiety wskazują odwiedzane ścieżki, nie dowodzą złośliwości.</p><h3>User-Agent</h3><ul>'+ (uas or '<li>Brak danych (starsze wpisy nie zawierają nagłówka)</li>')+'</ul><table><tr><th>Czas</th><th>Zdarzenie</th><th>Pułapka</th><th>Odstęp HTTP</th></tr>'+rows+'</table></section>'
+
+
+def run_health_checks():
+    now=time.time();config=CONFIG['health_checks'];checks={}
+    for name,url in (('Frog SOC','http://127.0.0.1:'+str(PORT)+'/health'),('Gatus',config['gatus_url'])):
+        if not url:
+            checks[name]={'ok':None,'detail':'Nie skonfigurowano endpointu HTTP','at':now}
+            continue
+        started=time.monotonic()
+        try:
+            request=urllib.request.Request(url,headers={'User-Agent':'FrogSOC-Health/6.0'})
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request,timeout=config['timeout_seconds']) as response:
+                code=response.status;body=response.read(256)
+                ok=code==200 and (name!='Frog SOC' or body.strip()==b'ok')
+            detail='HTTP '+str(code)+' · '+str(round((time.monotonic()-started)*1000))+' ms'
+        except (OSError,ValueError) as exc:
+            ok=False;detail='Brak poprawnej odpowiedzi HTTP ('+type(exc).__name__+')'
+        checks[name]={'ok':ok,'detail':detail,'at':now}
+    raw=command_output(['tailscale','status','--json'],timeout=3)
+    try:
+        status=json.loads(raw)
+        online=status.get('Self',{}).get('Online')
+        ok=status.get('BackendState')=='Running' and bool(status.get('TailscaleIPs')) and online is not False
+        detail='Backend '+str(status.get('BackendState','?'))+' · online: '+('TAK' if online else 'NIE' if online is False else 'brak pola')
+    except (ValueError,TypeError,AttributeError):
+        ok=False;detail='Brak poprawnego statusu tailscale --json'
+    checks['Tailscale']={'ok':ok,'detail':detail,'at':now}
+    ports,_=net_ports();age=now-ENDLESSH_SUCCESS if ENDLESSH_SUCCESS else None
+    ready=ENDLESSH_PORT in ports and age is not None and age<=config['endlessh_stale_seconds'] and not ENDLESSH_ERROR
+    checks['Endlessh']={'ok':ready if ENDLESSH_SUCCESS or now-BOOT>30 else None,'detail':'Nasłuch: '+('TAK' if ENDLESSH_PORT in ports else 'NIE')+' · ostatni odczyt logu: '+('brak' if age is None else str(round(age))+' s temu'),'at':now}
+    with HEALTH_LOCK:
+        HEALTH_STATE.clear();HEALTH_STATE.update(checks)
+    return checks
+
+
+def health_worker():
+    while True:
+        try:
+            run_health_checks()
+        except Exception:
+            logging.exception('Testy sprawności usług')
+        time.sleep(CONFIG['health_checks']['interval_seconds'])
+
+
+def health_page():
+    with HEALTH_LOCK:
+        checks=dict(HEALTH_STATE)
+    rows=''.join('<tr><td>'+esc(name)+'</td><td>'+('OK' if row['ok'] else 'BŁĄD' if row['ok'] is False else 'N/D')+'</td><td>'+esc(row['detail'])+'</td><td>'+stamp(row['at'])+'</td></tr>' for name,row in checks.items())
+    return layout('Sprawność usług', '<section class="box"><p>Testy co '+str(CONFIG['health_checks']['interval_seconds'])+' s. Gatus: odpowiedź HTTP, Tailscale: backend/adres/stan online, Endlessh: nasłuch i świeżość odczytu logów. Nie otwieramy dodatkowych sesji pułapki.</p><p>Stan Tailscale nie jest testem połączenia z konkretnym peerem. HTTP 200 Gatus nie potwierdza zdrowia wszystkich monitorowanych przez niego endpointów.</p><table><tr><th>Usługa</th><th>Stan</th><th>Szczegóły</th><th>Sprawdzono</th></tr>'+ (rows or '<tr><td colspan="4">Pierwszy test trwa</td></tr>')+'</table></section>')
+
+
+def map_data(day=''):
+    date=datetime.datetime.strptime(day,'%Y-%m-%d').date() if day else datetime.date.today()
+    start=datetime.datetime.combine(date,datetime.time.min).timestamp()
+    end=datetime.datetime.combine(date+datetime.timedelta(days=1),datetime.time.min).timestamp()
+    with DB_LOCK:
+        with db_connect() as c:
+            c.create_function('norm_ip',1,observed_ip)
+            rows=c.execute("SELECT g.ip,g.country,g.lat,g.lon,CAST(strftime('%H',e.ts,'unixepoch','localtime') AS INT),COUNT(*) FROM events e JOIN geo g ON norm_ip(e.ip)=g.ip WHERE e.ts>=? AND e.ts<? GROUP BY g.ip,CAST(strftime('%H',e.ts,'unixepoch','localtime') AS INT) ORDER BY COUNT(*) DESC,g.ip LIMIT 5000",(start,end)).fetchall()
+            total=c.execute('SELECT COUNT(*) FROM events WHERE ts>=? AND ts<?',(start,end)).fetchone()[0]
+    points=[{'ip':ip,'country':country,'lat':lat,'lon':lon,'hour':min(hour,23),'count':count} for ip,country,lat,lon,hour,count in rows]
+    return {'day':date.isoformat(),'points':points,'http_total':total,'limit':5000}
+
+
+def map_markup(demo=False):
+    return '<svg id="world-map" viewBox="0 0 960 480" role="img" aria-label="Mapa aktywności IP" data-source="'+('/demo/data' if demo else '/geo/data')+'"><image href="/assets/world.svg" width="960" height="480"/><g id="map-dots"></g></svg><label>Godzina (narastająco): <output id="map-hour">23</output><input id="map-range" type="range" min="0" max="23" value="23"></label><button id="map-play" type="button">▶ Odtwórz dzień</button><p id="map-status" role="status">Wczytywanie mapy…</p>'
+
+
+def map_page(day=''):
+    date=datetime.datetime.strptime(day,'%Y-%m-%d').date() if day else datetime.date.today()
+    return layout('Mapa i oś czasu', '<section class="box"><form action="/geo" method="get"><label>Dzień<input name="day" type="date" value="'+date.isoformat()+'"></label><button>Pokaż</button></form><p>Kontury Natural Earth · grupowanie w komórkach 5° · przybliżona geolokalizacja IP HTTP. Maks. 5000 grup IP/godzina, wyłącznie IP już zlokalizowane przez worker.</p>'+map_markup()+'<p>Geolokalizacja nie dowodzi pochodzenia osoby. Dane mapy nie są wysyłane do dostawcy kafelków.</p></section>')
+
+
+def demo_data():
+    samples=[('192.0.2.10','Polska',52,21),('198.51.100.20','USA',39,-98),('203.0.113.30','Japonia',36,138),('192.0.2.40','Brazylia',-15,-48),('198.51.100.50','Australia',-33,151)]
+    return {'day':'DEMO','http_total':1248,'limit':5000,'points':[{'ip':ip,'country':country+' (fikcyjne)','lat':lat,'lon':lon,'hour':hour,'count':(i+1)*(hour+1)} for i,(ip,country,lat,lon) in enumerate(samples) for hour in (3,8,12,18,23)]}
+
+
+def demo_page():
+    content='<h1>🐸 Frog SOC · DEMO</h1><p>WYŁĄCZNIE FIKCYJNE DANE · bez odczytu historii serwera · bez zapisu formularzy</p><div class="cards"><section><h2>1248</h2><p>Żądań HTTP</p></section><section><h2>37</h2><p>Przykładowych IP</p></section><section><h2>12</h2><p>Sesji Endlessh</p></section><section><h2>🐸 Poziom 8</h2><p>Pokazowy rozwój żaby</p></section></div><section><h2>Profil przykładowego bota · 192.0.2.10</h2><p>12:00 GET / → 12:01 GET /.env → 12:02 GET /wp-login.php</p><p>Rozpoznanie: konfiguracja i WordPress · User-Agent: DemoBot/1.0</p><p>To przykładowa sekwencja, nie dane prawdziwej osoby.</p></section><section><h2>Mapa demonstracyjna</h2>'+map_markup(True)+'</section><p>Operacje administracyjne i kasowanie danych są niedostępne w demo.</p><script defer src="/assets/features.js"></script>'
+    return trap_shell('Frog SOC — demonstracja',content)
+
+
+def admin_token(scope):
+    value=base64.urlsafe_b64encode(json.dumps({'scope':scope,'issued':time.time()}).encode()).decode()
+    return value+'.'+hmac.new(CSRF_KEY,value.encode(),hashlib.sha256).hexdigest()
+
+
+def verify_admin_token(token,scope):
+    try:
+        value,signature=token.split('.')
+        if not secrets.compare_digest(signature,hmac.new(CSRF_KEY,value.encode(),hashlib.sha256).hexdigest()):
+            raise ValueError('signature')
+        payload=json.loads(base64.urlsafe_b64decode(value))
+        issued=float(payload['issued'])
+        if payload['scope']!=scope or not math.isfinite(issued) or not -30<=time.time()-issued<=1800:
+            raise ValueError('expired')
+    except (ValueError,TypeError,KeyError,UnicodeError):
+        raise PermissionError('Nieprawidłowy token') from None
+
+
+def change_rule(fields):
+    def one(name,default=''):
+        values=fields.get(name,[default])
+        if len(values)!=1: raise ValueError('Powtórzone pole')
+        return values[0]
+    verify_admin_token(one('token'),'watch-rules')
+    action=one('action','save');rule_id=int(one('id','0'))
+    if action not in ('save','delete','toggle') or rule_id<0:
+        raise ValueError('Nieprawidłowa operacja')
+    if action=='save':
+        name=one('name').strip();kind=one('kind');path=one('path').strip();window=int(one('window_seconds','60'));threshold=int(one('threshold','1'))
+        if not name or len(name)>80 or kind not in ('path','panels') or not 1<=window<=86400 or not 1<=threshold<=10000:
+            raise ValueError('Nieprawidłowa nazwa, typ lub próg reguły')
+        if kind=='path' and (not path.startswith('/') or len(path)>150 or '*' in path[:-1] or any(ord(char)<32 for char in path)):
+            raise ValueError('Podaj ścieżkę /... albo prefiks zakończony *')
+        if kind=='panels' and threshold>6:
+            raise ValueError('Reguła paneli obsługuje najwyżej 6 różnych profili')
+    with DB_LOCK:
+        with db_connect() as c:
+            if action=='delete':
+                c.execute('DELETE FROM watch_rules WHERE id=?',(rule_id,))
+            elif action=='toggle':
+                c.execute('UPDATE watch_rules SET enabled=1-enabled WHERE id=?',(rule_id,))
+            elif rule_id:
+                if not c.execute('UPDATE watch_rules SET name=?,kind=?,path=?,window_seconds=?,threshold=? WHERE id=?',(name,kind,path,window,threshold,rule_id)).rowcount:
+                    raise ValueError('Nie znaleziono reguły')
+            else:
+                if c.execute('SELECT COUNT(*) FROM watch_rules').fetchone()[0]>=25:
+                    raise ValueError('Maksymalnie 25 reguł')
+                c.execute('INSERT INTO watch_rules (name,kind,path,window_seconds,threshold,enabled) VALUES (?,?,?,?,?,1)',(name,kind,path,window,threshold))
+
+
+def rules_page(params=None):
+    params=params or {};edit=int(params.get('edit','0'))
+    with DB_LOCK:
+        with db_connect() as c:
+            rules=c.execute('SELECT id,name,kind,path,window_seconds,threshold,enabled FROM watch_rules ORDER BY id').fetchall()
+    current=next((row for row in rules if row[0]==edit),(0,'Obserwuj backup','path','/backup.zip',60,1,1))
+    token=admin_token('watch-rules')
+    rows=[]
+    for rule_id,name,kind,path,window,threshold,enabled in rules:
+        actions='<a href="/rules?edit='+str(rule_id)+'">Edytuj</a><form method="post" action="/rules/save"><input type="hidden" name="token" value="'+esc(token)+'"><input type="hidden" name="id" value="'+str(rule_id)+'"><button name="action" value="toggle">'+('Wyłącz' if enabled else 'Włącz')+'</button><button name="action" value="delete">Usuń regułę</button></form>'
+        rows.append('<tr><td>'+esc(name)+'</td><td>'+esc(kind)+' '+esc(path)+'</td><td>'+str(threshold)+' / '+str(window)+' s</td><td>'+('ON' if enabled else 'OFF')+'</td><td>'+actions+'</td></tr>')
+    rule_id,name,kind,path,window,threshold,_=current
+    form='<form method="post" action="/rules/save"><input type="hidden" name="token" value="'+esc(token)+'"><input type="hidden" name="id" value="'+str(rule_id)+'"><label>Nazwa<input name="name" maxlength="80" value="'+esc(name)+'" required></label><label>Typ<select name="kind"><option value="path"'+(' selected' if kind=='path' else '')+'>Żądania ścieżki / prefiksu</option><option value="panels"'+(' selected' if kind=='panels' else '')+'>Różne panele z jednego IP</option></select></label><label>Ścieżka / prefiks*<input name="path" value="'+esc(path)+'"></label><label>Okno sekund<input type="number" name="window_seconds" min="1" max="86400" value="'+str(window)+'"></label><label>Próg<input type="number" name="threshold" min="1" max="10000" value="'+str(threshold)+'"></label><button name="action" value="save">Zapisz regułę</button></form>'
+    return layout('Własne reguły obserwacji','<section class="box"><p>Maks. 25 reguł, bez wyrażeń regularnych i wykonywania kodu. Typ path liczy żądania jednego IP dla ścieżki lub prefiksu z końcowym *. Typ panels liczy różne profile pułapek jednego IP; ścieżka jest wtedy pomijana.</p><p>Przykłady: /backup.zip, próg 1 w 60 s; różne panele, próg 5 w 60 s. Powiadomienia korzystają z Discorda i wyciszenia per reguła. Dane reguł są w SQLite i nie wymagają restartu.</p><table><tr><th>Nazwa</th><th>Warunek</th><th>Próg</th><th>Stan</th><th>Operacje</th></tr>'+''.join(rows)+'</table></section><section class="box"><h2>'+('Edytuj' if rule_id else 'Dodaj')+' regułę</h2>'+form+'</section>')
+
+
+def rule_alerts(now=None):
+    now=time.time() if now is None else now;alerts=[]
+    with DB_LOCK:
+        with db_connect() as c:
+            c.create_function('norm_ip',1,observed_ip)
+            c.create_function('trap_profile',1,trap_profile)
+            rules=c.execute('SELECT id,name,kind,path,window_seconds,threshold FROM watch_rules WHERE enabled=1 ORDER BY id LIMIT 25').fetchall()
+            for rule_id,name,kind,path,window,threshold in rules:
+                if kind=='path':
+                    if path.endswith('*'):
+                        condition="e.path LIKE ? ESCAPE '\\'";value=path[:-1].replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
+                    else:
+                        condition='e.path=?';value=path
+                    rows=c.execute('SELECT norm_ip(e.ip),COUNT(*) FROM events e WHERE e.ts BETWEEN ? AND ? AND norm_ip(e.ip) IS NOT NULL AND '+condition+' GROUP BY norm_ip(e.ip) HAVING COUNT(*)>=? ORDER BY COUNT(*) DESC LIMIT 5',(now-window,now,value,threshold)).fetchall()
+                else:
+                    rows=c.execute("SELECT norm_ip(e.ip),COUNT(DISTINCT COALESCE(NULLIF(d.profile,''),trap_profile(e.path))) FROM events e LEFT JOIN http_details d ON d.event_id=e.rowid WHERE e.ts BETWEEN ? AND ? AND norm_ip(e.ip) IS NOT NULL GROUP BY norm_ip(e.ip) HAVING COUNT(DISTINCT COALESCE(NULLIF(d.profile,''),trap_profile(e.path)))>=? ORDER BY 2 DESC LIMIT 5",(now-window,now,threshold)).fetchall()
+                if rows:
+                    alerts.append(('watch:'+str(rule_id),'Reguła '+name+': '+', '.join(ip+' ('+str(count)+')' for ip,count in rows)+' w '+str(window)+' s; do 5 adresów'))
+    return alerts
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     initialize_db()
@@ -1579,4 +1944,5 @@ if __name__ == '__main__':
         threading.Thread(target=maintenance_worker, daemon=True).start()
         threading.Thread(target=endlessh_worker, daemon=True).start()
         threading.Thread(target=daily_report_worker, daemon=True).start()
+        threading.Thread(target=health_worker, daemon=True).start()
         server.serve_forever(poll_interval=0.5)

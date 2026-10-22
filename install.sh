@@ -30,6 +30,7 @@ p=pathlib.Path(app.PASSWORD_FILE);p.touch(mode=0o600);p.write_text(first+'\n')
 PYTHON
 mkdir -p /opt/frog-soc
 cp "$STAGE/deploy/app.py" /opt/frog-soc/app.py
+cp "$STAGE/deploy/features.js" "$STAGE/deploy/world.svg" /opt/frog-soc/
 cp "$TMPDIR_FROG/config.json" /opt/frog-soc/config.json
 cp "$TMPDIR_FROG/.soc-password" /opt/frog-soc/.soc-password
 chmod 600 /opt/frog-soc/config.json /opt/frog-soc/.soc-password

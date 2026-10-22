@@ -5,10 +5,14 @@ set -eu
 STAGE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 APPDIR=/opt/frog-soc
 [ -f "$APPDIR/app.py" ] && [ -f "$APPDIR/.soc-password" ]
-BACKUP="$APPDIR/backups/v5-$(date +%Y%m%d-%H%M%S)"
+[ -s "$STAGE/features.js" ] && [ -s "$STAGE/world.svg" ]
+BACKUP="$APPDIR/backups/v6-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$BACKUP"
 chmod 700 "$BACKUP"
 cp -p "$APPDIR/app.py" "$BACKUP/app.py"
+for asset in features.js world.svg; do
+    if [ -f "$APPDIR/$asset" ]; then cp -p "$APPDIR/$asset" "$BACKUP/$asset"; fi
+done
 if [ -f "$APPDIR/config.json" ]; then
     cp -p "$APPDIR/config.json" "$BACKUP/config.json"
 else
@@ -34,12 +38,21 @@ if os.path.exists(source):
     with sqlite3.connect(source) as src, sqlite3.connect(sys.argv[1]+'/soc-history.sqlite3') as dst:
         src.backup(dst)
 PY
-cp "$STAGE/app.py" "$APPDIR/.app-v5.tmp"
-chown root:root "$APPDIR/.app-v5.tmp"
-chmod 644 "$APPDIR/.app-v5.tmp"
-mv "$APPDIR/.app-v5.tmp" "$APPDIR/app.py"
+for asset in features.js world.svg; do
+    cp "$STAGE/$asset" "$APPDIR/.$asset.tmp"
+    chown root:root "$APPDIR/.$asset.tmp"
+    chmod 644 "$APPDIR/.$asset.tmp"
+    mv "$APPDIR/.$asset.tmp" "$APPDIR/$asset"
+done
+cp "$STAGE/app.py" "$APPDIR/.app-v6.tmp"
+chown root:root "$APPDIR/.app-v6.tmp"
+chmod 644 "$APPDIR/.app-v6.tmp"
+mv "$APPDIR/.app-v6.tmp" "$APPDIR/app.py"
 rollback() {
     cp -p "$BACKUP/app.py" "$APPDIR/app.py"
+    for asset in features.js world.svg; do
+        if [ -f "$BACKUP/$asset" ]; then cp -p "$BACKUP/$asset" "$APPDIR/$asset"; else rm -f "$APPDIR/$asset"; fi
+    done
     if [ -f "$BACKUP/config.json" ]; then cp -p "$BACKUP/config.json" "$APPDIR/config.json"; fi
     rc-service frog-soc restart || true
     echo "Błąd wdrożenia. Przywrócono aplikację. Backup: $BACKUP" >&2
@@ -55,10 +68,14 @@ headers={'Authorization':'Basic '+base64.b64encode(('frog:'+password).encode()).
 base='http://127.0.0.1:'+str(app.PORT)
 for attempt in range(20):
     try:
-        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','5.2'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
+        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.0'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
+            if path=='/demo' and not app.CONFIG['demo_enabled']: continue
             request=urllib.request.Request(base+path,headers=headers)
             with urllib.request.urlopen(request,timeout=5) as response:
                 assert marker in response.read().decode(), path
+        for profile in app.CONFIG['honeypots']['enabled']:
+            with urllib.request.urlopen(base+'/traps/'+profile,timeout=5) as response:
+                assert 'action="/traps/'+profile+'/login"' in response.read().decode()
         try:
             urllib.request.urlopen(urllib.request.Request(base+'/ssh?from=bad',headers=headers),timeout=5)
             raise AssertionError('Nieprawidłowy filtr nie został odrzucony')
@@ -102,4 +119,4 @@ rc-service frog-soc status || rollback
 if command -v logrotate >/dev/null 2>&1 && [ -f "$STAGE/frog-soc.logrotate" ]; then
     cp "$STAGE/frog-soc.logrotate" /etc/logrotate.d/frog-soc
 fi
-printf 'Frog SOC 5.2 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
+printf 'Frog SOC 6.0 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"

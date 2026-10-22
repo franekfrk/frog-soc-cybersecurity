@@ -1,13 +1,121 @@
-# 🐸 Frog SOC 5.2
+# 🐸 Frog SOC 6.0
 
 [Polski](README.md) · **English**
 
-A lightweight **Alpine Linux / OpenRC** cybersecurity lab dashboard: VPS
+A lightweight cybersecurity lab dashboard for **Linux with Python 3**: VPS
 monitoring, an HTTP honeypot, connection history from the separate **Endlessh**
 SSH tarpit, a shared event timeline, Discord alerts and a frog that earns XP.
-Python standard library only; no pip, Node.js or Docker required.
+Python standard library only; no pip, Node.js or Docker required. The supplied
+automatic installation/update scripts currently target Alpine/OpenRC, while
+the application itself can also run on other Linux distributions.
 
 Frog observes and alerts. It does not block IPs or replace a firewall or SIEM.
+
+## New in 6.0
+
+### More honeypots, linked from the homepage
+
+The public `/` page is a services portal linking to six separate profiles:
+
+| Route | Honeypot |
+| --- | --- |
+| `/traps/router` | Router management |
+| `/traps/camera` | IP camera console |
+| `/traps/nas` | Network storage / NAS |
+| `/traps/admin` | Administration console |
+| `/traps/wordpress` | Website publishing console |
+| `/traps/api` | API integration console |
+
+Each profile submits to `/traps/PROFILE/login`. These pages do not provide
+real authentication, files, streams or command execution. Captured submissions
+now include their originating profile; older submissions are marked as router.
+Additional decoys `/.env`, `/.git/config`, `/backup.zip` and `/config.json`
+return prepared fictional content, never actual VPS files. `/backup.zip`
+is a plain-text backup inventory placeholder, not an archive.
+
+All profiles share **one Frog HTTP port**. No six additional public ports are
+needed; Endlessh keeps its own separate TCP port. Example configuration:
+
+```json
+{
+  "honeypots": {
+    "enabled": ["router", "camera", "nas", "admin", "wordpress", "api"],
+    "homepage": "hub"
+  },
+  "health_checks": {
+    "gatus_url": "http://127.0.0.1:21888/health",
+    "timeout_seconds": 2,
+    "interval_seconds": 30,
+    "endlessh_stale_seconds": 120
+  },
+  "demo_enabled": true
+}
+```
+
+`homepage` can be `hub` or the name of an enabled profile. **21888 is another
+example port from the author's VPS**; use your own Gatus endpoint or an empty
+string to skip its HTTP check. Disabling a profile removes its link and route.
+Legacy `/admin`, `/login`, `/cgi-bin/luci` still map to router; `/wp-login.php`,
+`/camera`, `/nas` and `/api/login` have corresponding aliases.
+
+### Bot profiles and scan classification
+
+`/ip?ip=ADDRESS` combines HTTP, Endlessh, failed authentication and submission
+activity without displaying submitted credential contents. It shows up to 200
+recent events, User-Agent values, profiles and gaps between HTTP requests.
+A gap over 30 minutes splits visits in the available slice. One IP may represent
+multiple devices. User-Agent is client-supplied and spoofable; it is collected
+from this version onward, limited to 300 characters. Cookies and Authorization
+headers are not collected.
+
+Labels recognize WordPress, configuration, Git, backup, router/CGI, camera,
+NAS and API paths. Each includes a reason and matching example paths.
+A label match alone does not establish malicious activity.
+
+### Dashboard-managed observation rules
+
+`/rules` supports creating, editing, disabling and deleting up to 25 rules,
+without Python edits or restarts. Rules live in SQLite and are included in
+telemetry backups, rather than being written to `config.json`. Changes require
+POST and a signed token.
+
+- `path`: request count per IP for an exact path or prefix ending in `*`.
+- `panels`: count of distinct honeypot profiles visited by one IP.
+
+Examples: one `/backup.zip` request in 60 seconds; 5 different profiles within
+60 seconds. Windows range from 1–86400 seconds. Notifications use the existing
+alert worker and a per-rule cooldown, include up to 5 example IPs and never
+contain passwords. Rules do not execute regexes, code or shell commands.
+
+### Real service checks
+
+`/healthchecks` checks every 30 seconds: Frog's `/health`, HTTP from Gatus,
+Tailscale BackendState/address/online status, and the Endlessh listener plus
+freshness of successful log reads. A successful read is checked even without
+new connections; an old log modification time alone does not indicate failure.
+No test Endlessh connections are opened. These results replace process-only
+checks in the dashboard and required-service alerts.
+
+The checks have defined limits: Gatus HTTP 200 does not establish the health
+of all its monitored endpoints; Tailscale status is not a ping to every peer.
+
+### World map and demonstration mode
+
+![Demonstration map preview](docs/demo-map.png)
+
+`/geo` uses offline outlines for 177 countries from Natural Earth, a date filter,
+5° point clusters, an hourly slider and day playback. Data refreshes every
+30 seconds without resetting the slider. Hours use the server timezone;
+repeated daylight-saving hours are grouped together. Limit: 5,000 IP/hour groups.
+Only HTTP events with an existing geolocation entry are shown. Outlines need
+no external tiles or CDN; IP geolocation still uses `ipwho.is` as configured.
+Map source and terms are documented in `THIRD_PARTY.md`.
+
+Public `/demo` and `/demo/data` use only fictional data and documentation IPs.
+They never read production databases, log visits/submissions or expose admin
+operations. You can demonstrate Frog without disclosing VPS history; network
+access still depends on your exposed port. Disable with `demo_enabled: false`.
+The demo is not linked from the honeypot services portal.
 
 ## New in 5.2
 
@@ -122,7 +230,7 @@ SSH connection history requires a working Endlessh instance **with logging enabl
 
 ## Requirements
 
-- Alpine Linux with OpenRC.
+- Linux with `/proc`; Alpine Linux with OpenRC for the supplied automatic scripts.
 - Python 3 including `sqlite3` (tested with Python 3.12 and 3.14).
 - `/proc` access for memory, process and TCP monitoring.
 - Root/sudo for installation, reading protected logs and restarting services.
@@ -215,14 +323,52 @@ Tailscale; remove it from `required_services` if you only use an SSH tunnel.
 The fresh installer has shell syntax validation. The live VPS uses the existing-installation
 updater described below.
 
+## Other Linux distributions: running with systemd
+
+The application itself needs Python 3 with `sqlite3`, `/proc`, access to logs
+and a writable data directory. It does not depend on `apk` or OpenRC.
+**`install.sh`, `deploy/deploy.sh` and the standalone updater still target
+Alpine/OpenRC.** The following is a fresh manual installation example for
+systemd; preserve existing configuration and passwords when updating.
+
+Install Python 3 and separately Endlessh using your distribution's packages, then:
+
+```sh
+sudo mkdir -p /opt/frog-soc
+sudo cp deploy/app.py deploy/features.js deploy/world.svg /opt/frog-soc/
+sudo install -m 600 deploy/config.example.json /opt/frog-soc/config.json
+sudoedit /opt/frog-soc/config.json
+sudo python3 - <<'PYTHON'
+import getpass, pathlib
+first = getpass.getpass('Dashboard password (at least 12 characters): ')
+second = getpass.getpass('Repeat password: ')
+if len(first) < 12 or first != second:
+    raise SystemExit('Passwords differ or are too short')
+p = pathlib.Path('/opt/frog-soc/.soc-password')
+p.touch(mode=0o600)
+p.write_text(first + '\n')
+p.chmod(0o600)
+PYTHON
+sudo cp deploy/frog-soc.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now frog-soc
+```
+
+The template runs as root to access protected logs and `/proc`. Check with
+`systemctl status frog-soc`; read logs with `journalctl -u frog-soc`.
+Configure Endlessh, Tailscale, ports, firewall and the Endlessh log file separately.
+Manual updates require backups of application/configuration and SQLite, plus
+`systemctl restart frog-soc`. The unit is a template and was not installed
+on the author's VPS, which runs Alpine/OpenRC.
+
 ## Updating an existing installation
 
 Requires `/opt/frog-soc/app.py`, `.soc-password` and the `frog-soc` service.
 
 ```sh
-scp -r deploy USER@VPS:~/frog-update-v52
+scp -r deploy USER@VPS:~/frog-update-v6
 ssh USER@VPS
-sudo sh ~/frog-update-v52/deploy.sh
+sudo sh ~/frog-update-v6/deploy.sh
 ```
 
 For a nonstandard administration port, use `scp -P PORT` and `ssh -p PORT`,
@@ -230,7 +376,7 @@ or your SSH alias. Use a new destination directory if one already exists,
 so `scp -r` does not add an extra nested `deploy/` directory.
 
 The updater preserves the password and configuration, backs up the application
-and telemetry SQLite database under `/opt/frog-soc/backups/v5-DATE-TIME/`,
+and telemetry SQLite database under `/opt/frog-soc/backups/v6-DATE-TIME/`,
 replaces the application and restarts Frog. It checks authenticated views,
 CSV, JavaScript and invalid-filter handling. On restart/HTTP failure it restores
 the previous application and any pre-existing configuration. The database copy
@@ -243,7 +389,7 @@ A standalone generated updater is also available:
 sudo sh update-frog-soc-4.sh
 ```
 
-The filename is retained for compatibility; it installs **5.2** using the same
+The filename is retained for compatibility; it installs **6.0** using the same
 backup and validation procedure as `deploy/deploy.sh`.
 
 ## Access and dashboard routes
@@ -276,6 +422,9 @@ Then open `http://127.0.0.1:8080/soc`.
 | `/campaigns` | Similar attempt patterns across different IPs |
 | `/reports` | Daily Discord report preview and status |
 | `/credentials` | Usernames/passwords submitted to the fake router form |
+| `/rules` | Dashboard-managed observation rules |
+| `/healthchecks` | Real service checks |
+| `/demo` | Public demonstration using fictional data |
 | `/settings` | Configuration, importer, backup and maintenance status |
 | `/stats` | Recent HTTP and buffer rankings; hourly count from SQLite |
 | `/history` | 48-hour HTTP history |
@@ -377,9 +526,10 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-33 tests cover log import/rotation, IPv6, filters/CSV, configuration validation,
+47 tests cover log import/rotation, IPv6, filters/CSV, configuration validation,
 persistent alerts/XP, SQLite backups, authenticated HTTP routes, submission
-capture, access control, retention, statistics, pattern grouping, report scheduling
+capture, access control, retention, new honeypots, database-isolated demo,
+map data, bot profiles, observation rules, service checks, statistics, pattern grouping, report scheduling
 and confirmed deletion with CSRF tokens. HTTP tests require local TCP sockets.
 
 Keep **both README languages updated together**, as required by `AGENTS.md`.

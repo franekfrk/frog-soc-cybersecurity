@@ -1,5 +1,17 @@
 # Zmiany
 
+## 6.0
+
+- Portal publiczny z linkami do sześciu pułapek: router, kamera, NAS, admin, WordPress i API.
+- Fikcyjne przynęty konfiguracji, Git i kopii zapasowych; zapis źródła formularza.
+- Profil bota, User-Agent, sekwencje wizyt, odstępy i wyjaśnione etykiety skanowania.
+- Reguły obserwacji zarządzane w panelu, bez wykonywania kodu i restartów.
+- Rzeczywiste testy HTTP Gatus/Frog, statusu Tailscale i odczytu logów Endlessh.
+- Lokalna mapa Natural Earth, wybór dnia, grupowanie i odtwarzanie godzin.
+- Publiczny tryb demo z fikcyjnymi danymi, bez odczytu baz produkcyjnych.
+- Dokumentacja Linux/systemd i rozróżnienie przenośnej aplikacji od skryptów Alpine/OpenRC.
+- 47 testów oraz wizualne sprawdzenie strony głównej i odtwarzania mapy.
+
 ## 5.2
 
 - Statystyki loginów, haseł i kombinacji z zachowanych formularzy.

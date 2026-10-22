@@ -12,7 +12,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 '''
 result=header
-for name,delimiter in [('app.py','PY'),('config.example.json','CONFIG'),('deploy.sh','DEPLOY'),('frog-soc.logrotate','ROTATION')]:
+for name,delimiter in [('app.py','PY'),('config.example.json','CONFIG'),('deploy.sh','DEPLOY'),('frog-soc.logrotate','ROTATION'),('features.js','FEATURES'),('world.svg','WORLD')]:
     result+='cat > "$STAGE/'+name+'" <<\''+delimiter+"'\n"+(root/'deploy'/name).read_text().rstrip()+'\n'+delimiter+'\n'
 result+='sh "$STAGE/deploy.sh"\n'
 target=root/'update-frog-soc-4.sh'

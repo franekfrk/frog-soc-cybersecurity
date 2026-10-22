@@ -1,0 +1,15 @@
+[Unit]
+Description=Frog SOC monitoring and honeypot dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/frog-soc
+ExecStart=/usr/bin/python3 /opt/frog-soc/app.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
