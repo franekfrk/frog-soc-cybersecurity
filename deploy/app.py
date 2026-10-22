@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frog SOC 6.2; stdlib-only Linux mini SOC."""
+"""Frog SOC 6.3; stdlib-only Linux mini SOC."""
 import base64
 import collections
 import copy
@@ -29,7 +29,7 @@ import time
 import zipfile
 from urllib.parse import urlsplit, parse_qs, urlencode
 
-VERSION = '6.2'
+VERSION = '6.3'
 DEFAULT_CONFIG = {
     'capture_credentials': True, 'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
     'endlessh_logs': ['/var/log/endlessh.log*'],
@@ -235,7 +235,7 @@ def webhooks_notify(content):
         if not url.startswith('https://discord.com/api/webhooks/') and not url.startswith('https://discordapp.com/api/webhooks/'):
             return
         body = json.dumps({'content': content[:1800], 'allowed_mentions': {'parse': []}}).encode()
-        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.2'}, method='POST')
+        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.3'}, method='POST')
         with urllib.request.urlopen(req, timeout=6) as r:
             r.read(128)
         return True
@@ -269,7 +269,7 @@ def geo_lookup(ip):
                     old = c.execute('SELECT checked FROM geo WHERE ip=?',(safe_ip,)).fetchone()
                     if old and time.time()-old[0] < GEO_REFRESH: return
             # Third party geo service receives the public attacker IP; not credentials.
-            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.2'})
+            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.3'})
             with urllib.request.urlopen(req,timeout=3) as r:
                 data = json.load(r)
             if not data.get('success'): return
@@ -722,7 +722,7 @@ def layout(title, content):
     return ("<!doctype html><html lang='pl'><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<script defer src='/assets/live.js'></script><script defer src='/assets/features.js'></script>"
-        "<title>Frog SOC 6.2 — " + esc(title) + "</title><style>"
+        "<title>Frog SOC 6.3 — " + esc(title) + "</title><style>"
         ":root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#020d11;color:#c8ffe0;"
         "font:15px system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:20px}"
         "h1{font-size:27px;margin:12px 0}h2{font-size:17px;margin:0 0 14px}"
@@ -734,7 +734,7 @@ def layout(title, content):
         "td,th{padding:9px;border-bottom:1px solid #28403b;text-align:left;word-break:break-word}"
         "progress{width:100%;height:12px;accent-color:#80f7bc}code{color:#b9fad2}"
         "input,select,button{font:inherit;padding:9px;border-radius:6px;max-width:100%;background:#102c30;color:#dcffe9;border:1px solid #39665b}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}label{display:grid;gap:5px}nav{display:flex;flex-wrap:wrap;gap:8px}svg{max-width:100%}@media(max-width:600px){main{padding:10px}td,th{padding:7px}h1{font-size:22px}.grid{grid-template-columns:1fr}}"
-        "</style><main><nav><b>🐸 FROG SOC 6.2</b> &nbsp; "
+        "</style><main><nav><b>🐸 FROG SOC 6.3</b> &nbsp; "
         "<a href='/soc'>Centrum</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
         "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/credential-stats'>Statystyki logowania</a><a href='/campaigns'>Wzorce botów</a><a href='/reports'>Raport dzienny</a><a href='/rules'>Reguły</a><a href='/healthchecks'>Sprawność usług</a><a href='/demo'>Demo</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
         "</article><p class='muted' id='live-status'>Aktualizacja w tle · dostęp Tailscale/localhost + hasło</p>"
@@ -910,9 +910,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         finally:
             self.connection.settimeout(old_timeout)
-        if 'username' in fields or 'password' in fields:
+        credentials = login_fields(fields, profile)
+        if credentials is not None:
             try:
-                save_credentials(self.client_address[0], fields.get('username', [''])[0], fields.get('password', [''])[0], profile)
+                save_credentials(self.client_address[0], credentials[0], credentials[1], profile)
             except (OSError, sqlite3.Error):
                 logging.error('Nie udało się zapisać formularza honeypota')
                 self.send(503, 'Service unavailable.', 'text/plain; charset=utf-8')
@@ -1320,7 +1321,7 @@ def dispatch_alerts(alerts, now=None):
     for key,message in current.items():
         active,sent=prior.get(key,(0,0))
         if not active or now-sent>=CONFIG['alerts']['cooldown_seconds']:
-            if webhooks_notify('🚨 **FROG SOC 6.2** | '+message):
+            if webhooks_notify('🚨 **FROG SOC 6.3** | '+message):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('INSERT OR REPLACE INTO alert_state VALUES (?,?,?)',(key,1,now))
@@ -1329,7 +1330,7 @@ def dispatch_alerts(alerts, now=None):
     for key,(active,sent) in prior.items():
         if active and key not in current:
             # Record notices are one-shot observations, not incidents requiring recovery.
-            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.2** | Ustąpił alert: '+key):
+            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.3** | Ustąpił alert: '+key):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('UPDATE alert_state SET active=0 WHERE key=?',(key,))
@@ -1673,7 +1674,7 @@ def reports_page():
 
 TRAP_PROFILES = {
     'router': ('Gateway Manager', 'Network gateway configuration', '🌐'),
-    'camera': ('IP Camera Console', 'Live camera management', '📹'),
+    'camera': ('Network Video Recorder', 'Video surveillance management', '📹'),
     'nas': ('Storage Station', 'Files and shared volumes', '🗄️'),
     'admin': ('Administration Console', 'Infrastructure administration', '⚙️'),
     'wordpress': ('Site Publishing', 'Website publishing console', '📝'),
@@ -1682,28 +1683,75 @@ TRAP_PROFILES = {
 
 
 TRAP_PATHS = {'router':'/router','camera':'/camera','nas':'/storage','admin':'/console','wordpress':'/wp-admin','api':'/api'}
-TRAP_LOGIN_PATHS = {'router':'/router/login','camera':'/camera/login','nas':'/storage/login','admin':'/console/login','wordpress':'/wp-login.php','api':'/api/login'}
+TRAP_LOGIN_PATHS = {'router':'/webfig/','camera':'/doc/page/login.asp','nas':'/index.php/login','admin':'/console/login','wordpress':'/wp-login.php','api':'/api/login'}
+
+
+TRAP_DEVICES = {
+    'router': {'kind':'Network gateway', 'model':'MikroTik hEX · RB750Gr3', 'platform':'RouterOS · WebFig', 'node':'gateway-01'},
+    'camera': {'kind':'Network video recorder', 'model':'Hikvision DS-7608NI-K2', 'platform':'NVR · 8 channels', 'node':'nvr-01'},
+    'nas': {'kind':'File server', 'model':'Storage server', 'platform':'Nextcloud', 'node':'storage-01'},
+    'admin': {'kind':'Management server', 'model':'Infrastructure node', 'platform':'System Administration', 'node':'management-01'},
+    'wordpress': {'kind':'Web server', 'model':'Publishing server', 'platform':'WordPress', 'node':'web-01'},
+    'api': {'kind':'Application server', 'model':'Integration gateway', 'platform':'Developer API', 'node':'api-01'}
+}
+TRAP_THEMES = {
+    'router':'body{background:#eee;color:#292929}header{background:#333}section{border-radius:2px}button{background:#666}',
+    'camera':'body{background:#20242b;color:#252b35}main>p>a{color:#d6e1ed}header{background:#292e37;border-bottom:4px solid #d83237}section{max-width:540px;margin:auto}button{background:#c92c32;border-color:#c92c32}',
+    'nas':'body{background:#00679e;color:#263743}main>p>a{color:white}header{background:#005985}section{max-width:460px;margin:auto;border-radius:14px}button{background:#0082c9;border-color:#0082c9;width:100%}',
+    'wordpress':'body{background:#f0f0f1;color:#3c434a}header{background:#fff;color:#3c434a;border-bottom:1px solid #dcdcde}section{max-width:420px;margin:auto;border-radius:0}button{background:#2271b1}',
+    'admin':'header{background:#293d52}',
+    'api':'header{background:#153e42}button{background:#167269}'
+}
+
+
+TRAP_FORM_FIELDS = {
+    'router':('username','password'), 'camera':('username','password'),
+    'nas':('user','password'), 'admin':('username','password'),
+    'wordpress':('log','pwd'), 'api':('email','password')
+}
+TRAP_ALIASES = {
+    '/webfig':'router', '/webfig/index.html':'router', '/router/login':'router',
+    '/camera/login':'camera', '/doc/page/login.asp':'camera', '/storage/login':'nas', '/nextcloud/login':'nas',
+    '/admin':'router', '/login':'router', '/login.php':'router', '/cgi-bin/luci':'router',
+    '/cgi-bin/login.cgi':'router', '/wp-login.php':'wordpress', '/wp-admin':'wordpress',
+    '/camera':'camera', '/camera/login.cgi':'camera', '/nas':'nas', '/index.php/login':'nas',
+    '/administrator':'admin', '/admin/login':'admin', '/admin/login.php':'admin',
+    '/user/login':'admin', '/api/login':'api', '/api/auth/login':'api'
+}
+
+
+def login_fields(fields, profile):
+    # Prefer the profile's own names, then legacy and common client conventions.
+    preferred_user, preferred_password = TRAP_FORM_FIELDS[profile]
+    user_keys = tuple(dict.fromkeys((preferred_user,'username','user','login','log','email','luci_username')))
+    password_keys = tuple(dict.fromkeys((preferred_password,'password','pass','passwd','pwd','luci_password')))
+    if not any(key in fields for key in user_keys + password_keys):
+        return None
+    def first(keys):
+        return next((fields[key][0] for key in keys if key in fields), '')
+    return first(user_keys), first(password_keys)
 
 
 def trap_profile(path):
+    path = path.rstrip('/') or '/'
     natural={route:profile for profile,route in TRAP_PATHS.items()}
     natural.update({route:profile for profile,route in TRAP_LOGIN_PATHS.items()})
     if path.rstrip('/') in natural:
         profile=natural[path.rstrip('/')]
         return profile if profile in CONFIG['honeypots']['enabled'] else None
-    aliases={'/admin':'router','/login':'router','/cgi-bin/luci':'router','/wp-login.php':'wordpress','/wp-admin':'wordpress','/camera':'camera','/nas':'nas','/api/login':'api'}
     if path=='/':
         selected=CONFIG['honeypots']['homepage']
         return None if selected=='hub' else selected
-    if path in aliases:
-        profile=aliases[path]
+    if path in TRAP_ALIASES:
+        profile=TRAP_ALIASES[path]
         return profile if profile in CONFIG['honeypots']['enabled'] else None
     match=re.fullmatch(r'/traps/([a-z]+)(?:/login)?/?',path)
     return match[1] if match and match[1] in CONFIG['honeypots']['enabled'] else None
 
 
-def trap_shell(title, content):
-    return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>body{margin:0;background:#eef2f6;color:#203447;font:16px system-ui}header{background:#203447;color:white;padding:24px}main{max-width:1000px;margin:40px auto;padding:16px}section{background:white;padding:25px;border-radius:10px;border:1px solid #d2dce6}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}a{color:#2261a0}label{display:block;margin:16px 0}input,button{padding:12px;font:inherit;box-sizing:border-box;max-width:100%;border:1px solid #bac8d4;border-radius:5px}input{width:100%}button{background:#2261a0;color:white}form{max-width:400px}small{color:#66798c}</style><header><b>'+esc(title)+'</b></header><main>'+content+'</main></html>'
+def trap_shell(title, content, profile=None):
+    theme = TRAP_THEMES.get(profile, '')
+    return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>body{margin:0;background:#eef2f6;color:#203447;font:16px system-ui}header{background:#203447;color:white;padding:24px}main{max-width:1000px;margin:40px auto;padding:16px}section{background:white;padding:25px;border-radius:10px;border:1px solid #d2dce6}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}a{color:#2261a0}label{display:block;margin:16px 0}input,button{padding:12px;font:inherit;box-sizing:border-box;max-width:100%;border:1px solid #bac8d4;border-radius:5px}input{width:100%}button{background:#2261a0;color:white}form{max-width:400px}small{color:#66798c}'+theme+'</style><header><b>'+esc(title)+'</b></header><main>'+content+'</main></html>'
 
 
 def public_host(raw):
@@ -1718,7 +1766,13 @@ def public_host(raw):
 
 def trap_hub(host=''):
     host=public_host(host)
-    cards=''.join('<section><h2>'+TRAP_PROFILES[key][2]+' '+TRAP_PROFILES[key][0]+'</h2><p>'+TRAP_PROFILES[key][1]+'</p><a href="'+TRAP_PATHS[key]+'">Open console →</a></section>' for key in CONFIG['honeypots']['enabled'])
+    cards = ''
+    for key in CONFIG['honeypots']['enabled']:
+        device = TRAP_DEVICES[key]
+        cards += ('<section><h2>'+TRAP_PROFILES[key][2]+' '+esc(TRAP_PROFILES[key][0])+'</h2>'
+                  '<p>'+esc(device['model'])+'</p><p><strong>'+esc(device['platform'])+'</strong></p>'
+                  '<p><small>'+esc(device['kind'])+' · '+esc(device['node'])+'</small></p>'
+                  '<a href="'+TRAP_PATHS[key]+'">Open console →</a></section>')
     ssh_port=CONFIG['honeypots']['ssh_public_port'] or ENDLESSH_PORT
     cards+='<section><h2>🔑 SSH Access</h2><p>Remote access service</p><p>TCP port <strong>'+str(ssh_port)+'</strong></p><code>ssh -p '+str(ssh_port)+' '+esc(host)+'</code></section>'
     return trap_shell('Device Services Portal','<h1>Available services</h1><p>Select the device or service you want to manage.</p><div class="cards">'+cards+'</div><p><small>Configuration resources: <a href="/config.json">configuration</a> · <a href="/backup.zip">configuration backup</a></small></p>')
@@ -1726,25 +1780,35 @@ def trap_hub(host=''):
 
 def trap_page(profile, failed=False):
     title,subtitle,icon=TRAP_PROFILES[profile]
+    device=TRAP_DEVICES[profile]
     context={
-        'router':'WAN uplink · LAN interfaces · Wireless settings',
-        'camera':'Camera 01 · Video stream unavailable until sign-in',
-        'nas':'Shared folders · Storage pool · User access',
+        'router':'Ethernet interfaces · IP addresses · Firewall · Routing',
+        'camera':'Live view · Playback · Recording settings · Channel management',
+        'nas':'Files · Shared folders · Calendar · User access',
         'admin':'System status · Maintenance · Access control',
         'wordpress':'Publishing dashboard · Themes · Site settings',
         'api':'API keys · Integrations · Request usage'
     }[profile]
-    return trap_shell(title,'<p><a href="/">← All services</a></p><section><h1>'+icon+' '+esc(title)+'</h1><p>'+esc(subtitle)+'</p><p><small>'+esc(context)+'</small></p>'+('<p role="alert">Sign-in failed. Check your credentials.</p>' if failed else '')+'<form method="post" action="'+TRAP_LOGIN_PATHS[profile]+'"><label>Username<input name="username" autocomplete="off" maxlength="256"></label><label>Password<input type="password" name="password" autocomplete="off" maxlength="512"></label><button>Sign in</button></form></section>')
+    username_field, password_field = TRAP_FORM_FIELDS[profile]
+    label = 'Email address' if profile=='api' else 'Username or email address' if profile=='wordpress' else 'Login' if profile=='router' else 'Username or email' if profile=='nas' else 'Username'
+    user_id = 'user_login' if profile=='wordpress' else 'login-user'
+    password_id = 'user_pass' if profile=='wordpress' else 'login-password'
+    form = ('<form id="loginform" name="loginform" method="post" action="'+TRAP_LOGIN_PATHS[profile]+'" enctype="application/x-www-form-urlencoded">'
+            '<label for="'+user_id+'">'+label+'</label><input type="text" id="'+user_id+'" name="'+username_field+'" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="256" required>'
+            '<label for="'+password_id+'">Password</label><input type="password" id="'+password_id+'" name="'+password_field+'" autocomplete="current-password" maxlength="512" required>'
+            '<p><button type="submit" name="'+('wp-submit' if profile=='wordpress' else 'submit')+'" value="Log In">Sign in</button></p></form>')
+    identity = '<h2>'+esc(device['model'])+'</h2><p><strong>'+esc(device['platform'])+'</strong> · '+esc(device['node'])+'</p>'
+    return trap_shell(title+' — '+device['platform'],'<p><a href="/">← All services</a></p><section><h1>'+icon+' '+esc(title)+'</h1>'+identity+'<p>'+esc(subtitle)+'</p><p><small>'+esc(context)+'</small></p>'+('<p role="alert">Sign-in failed. Check your credentials.</p>' if failed else '')+form+'</section>',profile)
 
 
 def decoy_file(path):
     # Only in-memory fixtures; never read configuration, credentials or VPS files.
-    config = {'environment':'production','node':'gateway-01','api':'http://127.0.0.1/api','timezone':'UTC'}
+    config = {'environment':'production','node':'gateway-01','api':'http://127.0.0.1/api','timezone':'UTC', 'gateway':TRAP_DEVICES['router']['model'], 'recorder':TRAP_DEVICES['camera']['model'], 'storage':TRAP_DEVICES['nas']['platform']}
     if path == '/backup.zip':
         output = io.BytesIO()
         with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive:
-            files = {'router-config.json': {'hostname':'gateway-01','lan':{'address':'192.168.1.1','netmask':'255.255.255.0'},'dhcp':True},
-                     'camera-settings.json': {'name':'camera-01','resolution':'1920x1080','recording':{'enabled':True,'retention_days':7}}}
+            files = {'router-config.json': {'hostname':'gateway-01','model':TRAP_DEVICES['router']['model'],'platform':'RouterOS','lan':{'address':'192.168.88.1','netmask':'255.255.255.0'},'dhcp':True},
+                     'camera-settings.json': {'name':'nvr-01','model':TRAP_DEVICES['camera']['model'],'channels':8,'resolution':'1920x1080','recording':{'enabled':True,'retention_days':7}}}
             for name, value in files.items():
                 item = zipfile.ZipInfo(name, date_time=(2025,1,1,0,0,0))
                 item.external_attr = 0o600 << 16

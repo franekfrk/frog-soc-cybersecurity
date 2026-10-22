@@ -68,14 +68,17 @@ headers={'Authorization':'Basic '+base64.b64encode(('frog:'+password).encode()).
 base='http://127.0.0.1:'+str(app.PORT)
 for attempt in range(20):
     try:
-        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.2'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
+        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','6.3'),('/rules','Własne reguły'),('/healthchecks','Sprawność usług'),('/geo','Mapa i oś czasu'),('/geo/data','points'),('/demo','WYŁĄCZNIE FIKCYJNE'),('/assets/world.svg','<svg'),('/assets/features.js','world-map'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
             if path=='/demo' and not app.CONFIG['demo_enabled']: continue
             request=urllib.request.Request(base+path,headers=headers)
             with urllib.request.urlopen(request,timeout=5) as response:
                 assert marker in response.read().decode(), path
         for profile in app.CONFIG['honeypots']['enabled']:
             with urllib.request.urlopen(base+app.TRAP_PATHS[profile],timeout=5) as response:
-                assert 'action="'+app.TRAP_LOGIN_PATHS[profile]+'"' in response.read().decode()
+                page=response.read().decode()
+                assert 'action="'+app.TRAP_LOGIN_PATHS[profile]+'"' in page
+                assert app.TRAP_DEVICES[profile]['model'] in page
+                for field in app.TRAP_FORM_FIELDS[profile]: assert 'name="'+field+'"' in page
         try:
             urllib.request.urlopen(urllib.request.Request(base+'/ssh?from=bad',headers=headers),timeout=5)
             raise AssertionError('Nieprawidłowy filtr nie został odrzucony')
@@ -97,15 +100,17 @@ for attempt in range(20):
             except urllib.error.HTTPError as exc:
                 assert exc.code==401
         if app.CONFIG['capture_credentials']:
+            profile='wordpress' if 'wordpress' in app.CONFIG['honeypots']['enabled'] else app.CONFIG['honeypots']['enabled'][0]
+            user_field,password_field=app.TRAP_FORM_FIELDS[profile]
             username='__frog_check__'+secrets.token_hex(8)
             password=secrets.token_hex(16)
             try:
-                data=urllib.parse.urlencode({'username':username,'password':password}).encode()
-                with urllib.request.urlopen(urllib.request.Request(base+'/login',data=data),timeout=5) as response:
+                data=urllib.parse.urlencode({user_field:username,password_field:password}).encode()
+                with urllib.request.urlopen(urllib.request.Request(base+app.TRAP_LOGIN_PATHS[profile],data=data),timeout=5) as response:
                     assert response.status==200
                 with contextlib.closing(sqlite3.connect(app.CREDENTIALS_DB)) as c:
-                    row=c.execute('SELECT id FROM submissions WHERE username=? AND password=?',(username,password)).fetchone()
-                    assert row is not None
+                    row=c.execute('SELECT id,profile FROM submissions WHERE username=? AND password=?',(username,password)).fetchone()
+                    assert row is not None and row[1]==profile
                 with urllib.request.urlopen(urllib.request.Request(base+'/credentials',headers=headers),timeout=5) as response:
                     page=response.read().decode()
                 token=re.search('name="token" value="([^"]+)"',page).group(1)
@@ -134,4 +139,4 @@ rc-service frog-soc status || rollback
 if command -v logrotate >/dev/null 2>&1 && [ -f "$STAGE/frog-soc.logrotate" ]; then
     cp "$STAGE/frog-soc.logrotate" /etc/logrotate.d/frog-soc
 fi
-printf 'Frog SOC 6.2 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
+printf 'Frog SOC 6.3 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"

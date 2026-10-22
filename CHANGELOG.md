@@ -1,5 +1,13 @@
 # Zmiany
 
+## 6.3
+
+- Profile MikroTik hEX, Hikvision NVR i Nextcloud z opisami sprzętu na stronie głównej.
+- Oddzielne style, semantyczne formularze, pola log/pwd, user/password i typowe aliasy.
+- Zgodność starszych klientów, priorytety pól, limity i izolacja logowania administracyjnego.
+- Uproszczona emulacja HTTP, bez implementacji natywnych protokołów uwierzytelniania.
+- README PL/EN, 57 testów i test formularza alternatywnego we wdrożeniu.
+
 ## 6.2
 
 - Neutralne nagłówki HTTP, odmowy dostępu i błędy protokołu; obsługa HEAD.

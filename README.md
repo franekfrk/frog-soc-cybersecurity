@@ -1,4 +1,4 @@
-# 🐸 Frog SOC 6.2
+# 🐸 Frog SOC 6.3
 
 **Polski** · [English](README.en.md)
 
@@ -15,6 +15,37 @@ Frog obserwuje i alarmuje. Nie blokuje IP, nie zastępuje firewalla ani SIEM.
 [Otwórz portal usług](http://frog03.mikr.us:31888/) — publiczna strona HTTP
 instancji projektu, z odnośnikami do profili urządzeń. Panel administracyjny
 pozostaje chroniony. Ten adres działa z internetu bez pośrednictwa Cloudflare.
+
+## Co nowego w 6.3
+
+Portal pokazuje rodzaj urządzenia, model, system i nazwę węzła. Profile mają
+odrębne style i uproszczone formularze inspirowane urządzeniami/usługami:
+
+| Profil | Tożsamość | Adres formularza | Pola loginu / hasła |
+| --- | --- | --- | --- |
+| Router | MikroTik hEX RB750Gr3 / RouterOS WebFig | `/webfig/` | `username` / `password` |
+| Rejestrator | Hikvision DS-7608NI-K2 / NVR 8 kanałów | `/doc/page/login.asp` | `username` / `password` |
+| Pliki | Serwer Nextcloud | `/index.php/login` | `user` / `password` |
+| Administracja | Węzeł zarządzania | `/console/login` | `username` / `password` |
+| Strona WWW | WordPress | `/wp-login.php` | `log` / `pwd` |
+| API | Brama integracji | `/api/login` | `email` / `password` |
+
+Zbieranie rozpoznaje również nazwy `user`, `login`, `log`, `email`,
+`luci_username` oraz `pass`, `passwd`, `pwd`, `luci_password`; dotychczasowe
+`username`/`password` nadal działają. Pola właściwe dla profilu mają pierwszeństwo,
+także gdy są puste. Przy powtórzonej nazwie zapisywana jest pierwsza wartość.
+Dodatkowe adresy obejmują `/login.php`, `/cgi-bin/luci`, `/administrator`,
+`/admin/login`, `/camera/login.cgi`, `/nextcloud/login`, `/api/auth/login`.
+Dawne `/router/login`, `/camera/login` i `/storage/login` nadal działają.
+Wyłączenie profilu wyłącza również jego aliasy.
+
+To emulacja warstwy HTTP/formularzy na potrzeby honeypota, nie firmware ani
+instalacja tych produktów. Nie implementuje uwierzytelniania Digest, szyfrowania
+logowania producentów, WebDAV, strumieni wideo ani wykonywania poleceń.
+Samo podobieństwo strony nie gwarantuje częstszych prób logowania.
+Nazwy marek/modeli opisują fikcyjne profile; nie potwierdzają sprzętu VPS.
+Nie są ładowane logotypy, skrypty ani inne zasoby producentów.
+Ochrona panelu, limity, retencja i oddzielna baza formularzy pozostają aktywne.
 
 ## Co nowego w 6.2
 
@@ -60,7 +91,7 @@ Publiczna strona `/` to portal z linkami do sześciu niezależnych profili:
 | `/wp-admin` | Panel publikowania strony |
 | `/api` | Konsola integracji API |
 
-Formularze wysyłają dane pod `/router/login`, `/camera/login`, `/storage/login`,
+Formularze wysyłają dane pod `/webfig/`, `/doc/page/login.asp`, `/index.php/login`,
 `/console/login`, `/wp-login.php` i `/api/login`. Nie udostępniają
 prawdziwego logowania, plików, streamingu ani wykonywania poleceń. Zapisane
 formularze mają teraz oznaczenie pułapki. Stare wpisy są oznaczane jako router.
@@ -417,7 +448,7 @@ Można też użyć pojedynczego, generowanego skryptu:
 sudo sh update-frog-soc-4.sh
 ```
 
-Nazwa została zachowana dla zgodności; skrypt wdraża **6.2** i korzysta z tej
+Nazwa została zachowana dla zgodności; skrypt wdraża **6.3** i korzysta z tej
 samej procedury backupu i kontroli co `deploy/deploy.sh`.
 
 ## Dostęp i widoki
@@ -557,7 +588,7 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-51 testów obejmuje import i rotację logów, sesje IPv6, filtry/CSV,
+57 testów obejmuje import i rotację logów, sesje IPv6, filtry/CSV,
 walidację konfiguracji, trwałość wyciszenia i XP, backup SQLite oraz
 prawdziwe żądania HTTP z autoryzacją, nowe pułapki, demo bez odczytu bazy,
 mapę, nagłówki i błędy HTTP, HEAD, prywatność zasobów, poprawność ZIP,
