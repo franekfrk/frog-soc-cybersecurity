@@ -27,17 +27,23 @@ Nie blokuje adresów IP, nie jest firewallem ani pełnym systemem SIEM.
 
 ## Architektura i zależność od Endlessh
 
+**Porty 31888 i 41888 w tej dokumentacji są przykładami z VPS autora.**
+Nie są portami wymaganymi przez projekt ani numerami przypisanymi do tych
+usług. Na własnym serwerze wybierz dostępne porty przydzielone przez hosting.
+W dołączonym kodzie przykładowe wartości są zapisane jako ustawienia domyślne;
+przed wdrożeniem dopasuj je do swojej konfiguracji.
+
 **Frog SOC i Endlessh to dwie osobne usługi, nasłuchujące na dwóch różnych
 portach TCP. Oba porty trzeba skonfigurować na serwerze oraz udostępnić
 w firewallu i ewentualnym panelu przekierowań hostingu.**
 
-| Element | Rola | Domyślny port lokalny |
+| Element | Rola | Przykładowy port w dołączonej konfiguracji |
 | --- | --- | --- |
 | Frog SOC | Honeypot HTTP oraz chroniony panel WWW | **31888/TCP** |
 | Endlessh | Honeypot SSH, powoli wysyłający baner | **41888/TCP** |
 | Prawdziwy serwer SSH | Logowanie administratora na VPS | Osobny port ustalony przez administratora/hosting |
 
-Frog SOC uruchamia własny serwer HTTP na `0.0.0.0:31888`. Endlessh musi być
+W dołączonej konfiguracji Frog SOC uruchamia własny serwer HTTP na `0.0.0.0:31888`. Endlessh musi być
 zainstalowany i uruchomiony osobno. Frog nie tworzy drugiej instancji
 Endlessh: obserwuje połączenia TCP na 41888 i importuje logi istniejącej usługi.
 
@@ -67,7 +73,23 @@ do geolokalizacji, a do webhooka Discord — tylko do powiadomień.
 
 ## Konfiguracja portów
 
-### 1. Frog SOC — 31888/TCP
+Najpierw ustal port publiczny i port lokalnego nasłuchu dla każdej usługi.
+Jeżeli hosting wystawia port bez zmiany numeru, mogą być takie same — tak
+jest w przykładzie autora. Jeśli używa mapowania NAT, numery mogą się różnić.
+Nie zakładaj, że Twój hosting udostępnia numery z tego README.
+
+| Ustawienie | Co wpisać na swoim VPS |
+| --- | --- |
+| Port publiczny HTTP | Port TCP dostępny/przydzielony dla pułapki Frog |
+| Lokalny port Frog | Wartość `PORT` w aplikacji, zgodna z celem mapowania |
+| Port publiczny Endlessh | Drugi dostępny/przydzielony port TCP dla pułapki SSH |
+| Lokalny port Endlessh | Wartość `-p` usługi, zgodna z monitoringiem Frog i celem mapowania |
+| Port administracyjny SSH | Osobny port prawdziwego serwera SSH |
+
+Poniższe polecenia i adresy używają przykładowych **31888/41888**. Zastąp je
+własnymi numerami; przykłady nie konfigurują portów automatycznie.
+
+### 1. Frog SOC — przykład 31888/TCP
 
 W kodzie aplikacji port określa `PORT = 31888`. W skrypcie
 `update-frog-soc-4.sh` aplikacja jest osadzona w bloku Python; wersja gotowa
@@ -100,7 +122,7 @@ Tailscale lub tunel SSH. Jeśli ustawiasz reverse proxy, pamiętaj, że kontrola
 źródła używa adresu połączenia TCP, a nie `X-Forwarded-For`; proxy na localhost
 zmieni sposób działania tej kontroli.
 
-### 2. Endlessh — 41888/TCP
+### 2. Endlessh — przykład 41888/TCP
 
 Przykład osobnej usługi OpenRC `/etc/init.d/endlessh`, zgodny z wdrożoną
 konfiguracją:
