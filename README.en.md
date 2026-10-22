@@ -11,6 +11,12 @@ the application itself can also run on other Linux distributions.
 
 Frog observes and alerts. It does not block IPs or replace a firewall or SIEM.
 
+## Public instance
+
+[Open the services portal](http://frog03.mikr.us:31888/) — the project instance’s
+public HTTP page, linking to its device profiles. The administration dashboard
+remains protected. This address is reachable from the Internet without Cloudflare.
+
 ## New in 6.2
 
 Public responses use a neutral `Server: WebServer` header without the Frog name

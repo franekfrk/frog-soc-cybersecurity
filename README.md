@@ -10,6 +10,12 @@ dla Alpine/OpenRC; aplikację można uruchomić również na innych dystrybucjac
 
 Frog obserwuje i alarmuje. Nie blokuje IP, nie zastępuje firewalla ani SIEM.
 
+## Publiczna instancja
+
+[Otwórz portal usług](http://frog03.mikr.us:31888/) — publiczna strona HTTP
+instancji projektu, z odnośnikami do profili urządzeń. Panel administracyjny
+pozostaje chroniony. Ten adres działa z internetu bez pośrednictwa Cloudflare.
+
 ## Co nowego w 6.2
 
 Publiczne odpowiedzi mają neutralny nagłówek `Server: WebServer`, bez nazwy
