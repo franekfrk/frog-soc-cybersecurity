@@ -1,4 +1,6 @@
-# 🐸 Frog SOC 5.0
+# 🐸 Frog SOC 5.1
+
+**Polski** · [English](README.en.md)
 
 Lekki panel cyberlaboratorium dla **Alpine Linux / OpenRC**: monitoring VPS,
 pułapka HTTP, historia osobnego honeypota SSH **Endlessh**, wspólna oś zdarzeń,
@@ -7,7 +9,27 @@ bez pip, Node.js i Dockera.
 
 Frog obserwuje i alarmuje. Nie blokuje IP, nie zastępuje firewalla ani SIEM.
 
-## Co nowego w 5.0
+## Co nowego w 5.1
+
+Fałszywy panel routera zapisuje login i hasło z wysłanego formularza
+`application/x-www-form-urlencoded` (`username`, `password`) pod `/login`
+lub pozostałymi znanymi ścieżkami pułapki. Nie dotyczy to logowania
+administracyjnego do Frog SOC.
+
+- Podgląd: **`/credentials`**, zakładka „Formularze pułapki”.
+- Dane: `/opt/frog-soc/honeypot-credentials.sqlite3`, uprawnienia `600`.
+- Hasła są zapisane jawnym tekstem; tylko chroniony panel umożliwia podgląd.
+  Rozwijane pole „Pokaż hasło” ukrywa je wizualnie, nie szyfruje danych.
+- Baza formularzy jest osobna i **nie jest kopiowana** przez automatyczne
+  backupy telemetrii ani backupy wdrożenia.
+- Domyślnie 7 dni / 10 000 wpisów; limit sprawdzany przy zapisie i utrzymaniu.
+- Maksymalny formularz: 4 KiB / 16 pól; login do 256 znaków, hasło do 512.
+- Dane nie są przesyłane do Discorda, CSV historii Endlessh ani logów HTTP.
+- W `config.json`: `capture_credentials: false` wyłącza dalsze zbieranie;
+  dotychczasowe wpisy pozostają do końca retencji. Parametry retencji:
+  `retention.credentials_days` i `retention.credentials_rows`.
+
+## Funkcje 5.0
 
 - Jeden `config.json`: porty, logi, zaufane sieci, progi alertów, retencja,
   częstotliwości odczytu i odświeżania, backupy.
@@ -176,7 +198,7 @@ Można też użyć pojedynczego, generowanego skryptu:
 sudo sh update-frog-soc-4.sh
 ```
 
-Nazwa została zachowana dla zgodności; skrypt wdraża **5.0** i korzysta z tej
+Nazwa została zachowana dla zgodności; skrypt wdraża **5.1** i korzysta z tej
 samej procedury backupu i kontroli co `deploy/deploy.sh`.
 
 ## Dostęp i widoki
@@ -205,6 +227,7 @@ Następnie otwórz `http://127.0.0.1:8080/soc`.
 | `/ssh.csv` | CSV, te same filtry co historia |
 | `/ip?ip=ADRES` | Podsumowanie danego IP |
 | `/activity` | 200 najnowszych zdarzeń HTTP/Endlessh/SSH, opcjonalny filtr `ip` |
+| `/credentials` | Loginy i hasła wpisane do fałszywego panelu routera |
 | `/settings` | Konfiguracja, stan odczytu logów, backupu i utrzymania |
 | `/stats` | Ostatnie HTTP i rankingi z bufora; licznik godzinowy z SQLite |
 | `/history` | Godzinowa historia HTTP 48 h |
@@ -290,9 +313,12 @@ XP jest inicjalizowane z zachowanej historii podczas migracji, a potem
 liczone trwale. Danych usuniętych przed migracją nie da się odtworzyć.
 Geolokalizacja wysyła publiczne IP HTTP do `ipwho.is`, maksymalnie 12 prób/h;
 wynik jest orientacyjny i nie dowodzi lokalizacji osoby. Można ją wyłączyć
-przez `geo_enabled: false`. Formularze honeypota nie są zapisywane.
+przez `geo_enabled: false`. Formularze honeypota są zapisywane w osobnej bazie zgodnie z konfiguracją 5.1.
 
 ## Rozwój i testy
+
+Utrzymuj README równolegle po polsku i po angielsku — zasada jest zapisana
+w `AGENTS.md`.
 
 Źródłem aplikacji jest **`deploy/app.py`**. Po zmianach odtwórz pojedynczy
 skrypt, żeby nie utrzymywać dwóch rozbieżnych wersji:
@@ -306,7 +332,7 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-18 testów obejmuje import i rotację logów, sesje IPv6, filtry/CSV,
+24 testy obejmują import i rotację logów, sesje IPv6, filtry/CSV,
 walidację konfiguracji, trwałość wyciszenia i XP, backup SQLite oraz
 prawdziwe żądania HTTP z autoryzacją. Test HTTP wymaga możliwości otwarcia
 lokalnego gniazda TCP.

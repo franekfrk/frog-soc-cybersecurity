@@ -1,3 +1,4 @@
+import contextlib
 import base64
 import csv
 import io
@@ -21,6 +22,7 @@ class FeatureTests(unittest.TestCase):
         self.app.EVENTFILE = str(self.root/'events.jsonl')
         self.app.PASSWORD_FILE = str(self.root/'password')
         self.app.CONFIG_PATH = str(self.root/'config.json')
+        self.app.CREDENTIALS_DB = str(self.root/'credentials.sqlite3')
         self.app.CONFIG['geo_enabled'] = False
         self.app.initialize_db()
 
@@ -115,7 +117,7 @@ class FeatureTests(unittest.TestCase):
         backups=list((self.root/'backups'/'automatic').glob('*.sqlite3'))
         self.assertEqual(len(backups),1)
         self.assertEqual(backups[0].stat().st_mode&0o777,0o600)
-        with sqlite3.connect(backups[0]) as c: self.assertEqual(c.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+        with contextlib.closing(sqlite3.connect(backups[0])) as c: self.assertEqual(c.execute('PRAGMA integrity_check').fetchone()[0],'ok')
         self.assertIn('15 XP',self.app.frog4())
 
     def test_real_http_auth_filters_export_and_new_pages(self):
@@ -126,7 +128,7 @@ class FeatureTests(unittest.TestCase):
         self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
         base='http://127.0.0.1:'+str(server.server_port)
         auth='Basic '+base64.b64encode(b'frog:test-only-password').decode()
-        for path,marker in [('/soc','Aktywność'),('/ssh?sort=longest','Port źródłowy'),('/ssh.csv?status=closed','2.125'),('/activity','Wspólna aktywność'),('/ip?ip=192.0.2.10','Łączny czas'),('/settings','5.0'),('/assets/live.js','setInterval'),('/frog','XP')]:
+        for path,marker in [('/soc','Aktywność'),('/ssh?sort=longest','Port źródłowy'),('/ssh.csv?status=closed','2.125'),('/activity','Wspólna aktywność'),('/ip?ip=192.0.2.10','Łączny czas'),('/settings','5.1'),('/assets/live.js','setInterval'),('/frog','XP')]:
             with self.subTest(path=path):
                 with urllib.request.urlopen(urllib.request.Request(base+path,headers={'Authorization':auth})) as response:
                     self.assertIn(marker,response.read().decode())

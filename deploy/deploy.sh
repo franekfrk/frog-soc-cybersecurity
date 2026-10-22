@@ -47,7 +47,7 @@ rollback() {
 }
 rc-service frog-soc restart || rollback
 if ! python3 - <<'PY'
-import base64, importlib.util, pathlib, time, urllib.request, urllib.error
+import base64, contextlib, importlib.util, pathlib, secrets, sqlite3, time, urllib.request, urllib.error, urllib.parse
 spec=importlib.util.spec_from_file_location('verify','/opt/frog-soc/app.py')
 app=importlib.util.module_from_spec(spec);spec.loader.exec_module(app)
 password=pathlib.Path(app.PASSWORD_FILE).read_text().strip()
@@ -55,7 +55,7 @@ headers={'Authorization':'Basic '+base64.b64encode(('frog:'+password).encode()).
 base='http://127.0.0.1:'+str(app.PORT)
 for attempt in range(20):
     try:
-        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','5.0'),('/frog','XP'),('/assets/live.js','setInterval')]:
+        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','5.1'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
             request=urllib.request.Request(base+path,headers=headers)
             with urllib.request.urlopen(request,timeout=5) as response:
                 assert marker in response.read().decode(), path
@@ -64,6 +64,21 @@ for attempt in range(20):
             raise AssertionError('Nieprawidłowy filtr nie został odrzucony')
         except urllib.error.HTTPError as exc:
             assert exc.code==400
+        if app.CONFIG['capture_credentials']:
+            username='__frog_check__'+secrets.token_hex(8)
+            password=secrets.token_hex(16)
+            try:
+                data=urllib.parse.urlencode({'username':username,'password':password}).encode()
+                with urllib.request.urlopen(urllib.request.Request(base+'/login',data=data),timeout=5) as response:
+                    assert response.status==200
+                with contextlib.closing(sqlite3.connect(app.CREDENTIALS_DB)) as c:
+                    assert c.execute('SELECT COUNT(*) FROM submissions WHERE username=? AND password=?',(username,password)).fetchone()[0]==1
+            finally:
+                with contextlib.closing(sqlite3.connect(app.CREDENTIALS_DB)) as c:
+                    c.execute('DELETE FROM submissions WHERE username=?',(username,))
+                    c.commit()
+            assert pathlib.Path(app.CREDENTIALS_DB).stat().st_mode & 0o777 == 0o600
+            print('Zapis formularza i uprawnienia bazy: OK (wpis testowy usunięty)')
         print('HTTP, filtry, CSV, aktywność, konfiguracja, XP i JS: OK')
         break
     except Exception:
@@ -78,4 +93,4 @@ rc-service frog-soc status || rollback
 if command -v logrotate >/dev/null 2>&1 && [ -f "$STAGE/frog-soc.logrotate" ]; then
     cp "$STAGE/frog-soc.logrotate" /etc/logrotate.d/frog-soc
 fi
-printf 'Frog SOC 5.0 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
+printf 'Frog SOC 5.1 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"

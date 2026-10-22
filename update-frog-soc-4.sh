@@ -7,7 +7,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 cat > "$STAGE/app.py" <<'PY'
 #!/usr/bin/env python3
-"""Frog SOC 5.0; stdlib-only Alpine/OpenRC mini SOC."""
+"""Frog SOC 5.1; stdlib-only Alpine/OpenRC mini SOC."""
 import base64
 import collections
 import copy
@@ -35,9 +35,9 @@ import threading
 import time
 from urllib.parse import urlsplit, parse_qs, urlencode
 
-VERSION = '5.0'
+VERSION = '5.1'
 DEFAULT_CONFIG = {
-    'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
+    'capture_credentials': True, 'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
     'endlessh_logs': ['/var/log/endlessh.log*'],
     'auth_logs': ['/var/log/auth.log', '/var/log/secure', '/var/log/messages'],
     'trusted_networks': ['100.64.0.0/10'], 'page_size': 50,
@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
                'ip_hour': 50, 'ssh_hour': 10, 'burst_factor': 3,
                'endlessh_record_seconds': 300, 'recovery': True},
     'retention': {'http_days': 90, 'http_rows': 30000, 'endlessh_days': 90,
-                  'endlessh_rows': 100000, 'auth_days': 30},
+                  'endlessh_rows': 100000, 'auth_days': 30, 'credentials_days': 7, 'credentials_rows': 10000},
     'maintenance': {'interval_seconds': 3600, 'backup_hours': 24, 'backup_keep': 7}
 }
 ROOT = os.environ.get('FROG_ROOT', '/opt/frog-soc')
@@ -110,6 +110,7 @@ BOOT = time.time()
 CACHE = {'at': 0, 'data': None}
 MAX_ACTIVE = threading.BoundedSemaphore(12)
 DB = ROOT + '/soc-history.sqlite3'
+CREDENTIALS_DB = ROOT + '/honeypot-credentials.sqlite3'
 WEBHOOK_FILE = ROOT + '/.discord-webhook'
 DB_LOCK = threading.Lock()
 GEO_LOCK = threading.Lock()
@@ -154,6 +155,9 @@ def db_connect():
 
 
 def initialize_db():
+    if CONFIG['capture_credentials']:
+        with credentials_connect():
+            pass
     with DB_LOCK:
         with db_connect() as c:
             n = c.execute('SELECT COUNT(*) FROM events').fetchone()[0]
@@ -207,7 +211,7 @@ def webhooks_notify(content):
         if not url.startswith('https://discord.com/api/webhooks/') and not url.startswith('https://discordapp.com/api/webhooks/'):
             return
         body = json.dumps({'content': content[:1800], 'allowed_mentions': {'parse': []}}).encode()
-        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/5.0'}, method='POST')
+        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/5.1'}, method='POST')
         with urllib.request.urlopen(req, timeout=6) as r:
             r.read(128)
         return True
@@ -241,7 +245,7 @@ def geo_lookup(ip):
                     old = c.execute('SELECT checked FROM geo WHERE ip=?',(safe_ip,)).fetchone()
                     if old and time.time()-old[0] < GEO_REFRESH: return
             # Third party geo service receives the public attacker IP; not credentials.
-            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/5.0'})
+            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/5.1'})
             with urllib.request.urlopen(req,timeout=3) as r:
                 data = json.load(r)
             if not data.get('success'): return
@@ -687,7 +691,7 @@ def layout(title, content):
     return ("<!doctype html><html lang='pl'><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<script defer src='/assets/live.js'></script>"
-        "<title>Frog SOC 5.0 — " + esc(title) + "</title><style>"
+        "<title>Frog SOC 5.1 — " + esc(title) + "</title><style>"
         ":root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#020d11;color:#c8ffe0;"
         "font:15px system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:20px}"
         "h1{font-size:27px;margin:12px 0}h2{font-size:17px;margin:0 0 14px}"
@@ -699,9 +703,9 @@ def layout(title, content):
         "td,th{padding:9px;border-bottom:1px solid #28403b;text-align:left;word-break:break-word}"
         "progress{width:100%;height:12px;accent-color:#80f7bc}code{color:#b9fad2}"
         "input,select,button{font:inherit;padding:9px;border-radius:6px;max-width:100%;background:#102c30;color:#dcffe9;border:1px solid #39665b}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}label{display:grid;gap:5px}nav{display:flex;flex-wrap:wrap;gap:8px}svg{max-width:100%}@media(max-width:600px){main{padding:10px}td,th{padding:7px}h1{font-size:22px}.grid{grid-template-columns:1fr}}"
-        "</style><main><nav><b>🐸 FROG SOC 5.0</b> &nbsp; "
+        "</style><main><nav><b>🐸 FROG SOC 5.1</b> &nbsp; "
         "<a href='/soc'>Centrum</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
-        "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
+        "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
         "</article><p class='muted' id='live-status'>Aktualizacja w tle · dostęp Tailscale/localhost + hasło</p>"
         "</main></html>")
 
@@ -790,7 +794,7 @@ def old_frog():
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = 'FrogSOC/5.0'
+    server_version = 'FrogSOC/5.1'
     def log_message(self, *args):
         pass
 
@@ -832,13 +836,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.route()
 
+    def capture_form(self):
+        if not CONFIG['capture_credentials']:
+            return True
+        if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
+            self.send(400, 'Wymagana długość formularza.', 'text/plain; charset=utf-8')
+            return False
+        try:
+            length = int(self.headers['Content-Length'])
+        except (ValueError, TypeError):
+            self.send(400, 'Niepoprawna długość.', 'text/plain; charset=utf-8')
+            return False
+        if not 0 <= length <= 4096:
+            self.send(413, 'Za duży formularz.', 'text/plain; charset=utf-8')
+            return False
+        if self.headers.get_content_type() != 'application/x-www-form-urlencoded':
+            self.send(415, 'Nieobsługiwany formularz.', 'text/plain; charset=utf-8')
+            return False
+        old_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(3)
+            body = self.rfile.read(length)
+            if len(body) != length:
+                self.send(400, 'Niekompletny formularz.', 'text/plain; charset=utf-8')
+                return False
+            fields = parse_qs(body.decode('utf-8', 'replace'), keep_blank_values=True, max_num_fields=16)
+        except (OSError, ValueError):
+            self.send(400, 'Nie można odczytać formularza.', 'text/plain; charset=utf-8')
+            return False
+        finally:
+            self.connection.settimeout(old_timeout)
+        if 'username' in fields or 'password' in fields:
+            try:
+                save_credentials(self.client_address[0], fields.get('username', [''])[0], fields.get('password', [''])[0])
+            except (OSError, sqlite3.Error):
+                logging.error('Nie udało się zapisać formularza honeypota')
+                self.send(503, 'Spróbuj ponownie później.', 'text/plain; charset=utf-8')
+                return False
+        return True
+
     def route(self):
         path = urlsplit(self.path).path
-        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/assets/live.js'):
+        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/credentials', '/assets/live.js'):
             if not self.authorized():
                 return
             params = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
             try:
+                if path == '/credentials':
+                    self.send(200, credentials_page(params))
+                    return
                 if path == '/assets/live.js':
                     self.send(200, live_script(), 'application/javascript; charset=utf-8')
                     return
@@ -866,6 +912,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == '/health':
             self.send(200, 'ok', 'text/plain; charset=utf-8')
             return
+        if self.command == 'POST' and path in ('/', '/admin', '/login', '/cgi-bin/luci'):
+            if not self.capture_form():
+                return
         log_event(self.client_address[0], path, self.command)
         if path in ('/', '/admin', '/login', '/cgi-bin/luci'):
             self.send(200, '<!doctype html><meta charset="utf-8"><title>Router Management</title>'
@@ -875,7 +924,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                       '<button>Sign in</button></form>')
         else:
             self.send(404, '<!doctype html><title>404</title><h2>404 Not Found</h2>')
-        # No request body is consumed or logged, including attempted passwords.
+        # Only known honeypot forms are collected; administration credentials are never stored.
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -1134,7 +1183,7 @@ def dispatch_alerts(alerts, now=None):
     for key,message in current.items():
         active,sent=prior.get(key,(0,0))
         if not active or now-sent>=CONFIG['alerts']['cooldown_seconds']:
-            if webhooks_notify('🚨 **FROG SOC 5.0** | '+message):
+            if webhooks_notify('🚨 **FROG SOC 5.1** | '+message):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('INSERT OR REPLACE INTO alert_state VALUES (?,?,?)',(key,1,now))
@@ -1143,7 +1192,7 @@ def dispatch_alerts(alerts, now=None):
     for key,(active,sent) in prior.items():
         if active and key not in current:
             # Record notices are one-shot observations, not incidents requiring recovery.
-            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 5.0** | Ustąpił alert: '+key):
+            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 5.1** | Ustąpił alert: '+key):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('UPDATE alert_state SET active=0 WHERE key=?',(key,))
@@ -1152,6 +1201,10 @@ def dispatch_alerts(alerts, now=None):
 def maintenance_once(now=None):
     now=time.time() if now is None else now
     retention=CONFIG['retention']
+    if os.path.exists(CREDENTIALS_DB):
+        with DB_LOCK:
+            with credentials_connect() as c:
+                prune_credentials(c, now)
     with DB_LOCK:
         with db_connect() as c:
             for table,column,days,limit in (('events','ts',retention['http_days'],retention['http_rows']),('endlessh_sessions','started',retention['endlessh_days'],retention['endlessh_rows']),('auth_events','ts',retention['auth_days'],None)):
@@ -1253,6 +1306,49 @@ def traffic_chart():
     return '<section class="box"><h2>Aktywność · 24 godziny</h2><p>Zielony: HTTP · niebieski: sesje Endlessh. Dane z SQLite.</p><svg role="img" aria-label="Godzinowa aktywność HTTP i Endlessh z ostatnich 24 godzin" viewBox="0 0 600 175">'+''.join(bars)+'<text x="12" y="170" fill="#c8ffe0">−23h</text><text x="530" y="170" fill="#c8ffe0">teraz</text></svg></section>'
 
 
+def credentials_connect():
+    c = sqlite3.connect(CREDENTIALS_DB, timeout=3, factory=SOCConnection)
+    os.chmod(CREDENTIALS_DB, 0o600)
+    c.execute('PRAGMA secure_delete=ON')
+    c.execute('CREATE TABLE IF NOT EXISTS submissions (id INTEGER PRIMARY KEY, ts REAL, ip TEXT, username TEXT, password TEXT)')
+    c.execute('CREATE INDEX IF NOT EXISTS submissions_ts ON submissions(ts)')
+    return c
+
+
+def prune_credentials(c, now):
+    retention = CONFIG['retention']
+    c.execute('DELETE FROM submissions WHERE ts<?', (now-retention['credentials_days']*86400,))
+    c.execute('DELETE FROM submissions WHERE id IN (SELECT id FROM submissions ORDER BY ts DESC,id DESC LIMIT -1 OFFSET ?)', (retention['credentials_rows'],))
+
+
+def save_credentials(ip, username, password):
+    with DB_LOCK:
+        with credentials_connect() as c:
+            c.execute('INSERT INTO submissions (ts,ip,username,password) VALUES (?,?,?,?)', (time.time(),ip,username[:256],password[:512]))
+            prune_credentials(c, time.time())
+
+
+def credentials_page(params=None):
+    params = params or {}
+    try:
+        page = max(1, int(params.get('page', '1')))
+    except ValueError:
+        raise ValueError('Nieprawidłowy numer strony')
+    if not os.path.exists(CREDENTIALS_DB):
+        return layout('Formularze pułapki', '<section class="box"><p>Brak zapisanych formularzy. Zbieranie: '+('włączone' if CONFIG['capture_credentials'] else 'wyłączone')+'</p></section>')
+    with DB_LOCK:
+        with credentials_connect() as c:
+            total = c.execute('SELECT COUNT(*) FROM submissions').fetchone()[0]
+            pages = max(1, (total+CONFIG['page_size']-1)//CONFIG['page_size'])
+            page = min(page, pages)
+            rows = c.execute('SELECT ts,ip,username,password FROM submissions ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?', (CONFIG['page_size'],(page-1)*CONFIG['page_size'])).fetchall()
+    body = ''.join('<tr><td>'+stamp(ts)+'</td><td>'+ip_link(ip)+'</td><td><code>'+esc(username)+'</code></td><td><details><summary>Pokaż hasło</summary><code>'+esc(password)+'</code></details></td></tr>' for ts,ip,username,password in rows)
+    nav = 'Strona '+str(page)+' / '+str(pages)
+    if page>1: nav += ' <a href="/credentials?page='+str(page-1)+'">← Nowsze</a>'
+    if page<pages: nav += ' <a href="/credentials?page='+str(page+1)+'">Starsze →</a>'
+    return layout('Formularze pułapki', '<section class="box"><p>Zbieranie: <b>'+('włączone' if CONFIG['capture_credentials'] else 'wyłączone')+'</b> · wpisy: '+str(total)+'</p><p>Loginy i hasła z fałszywego panelu routera. Retencja: '+str(CONFIG['retention']['credentials_days'])+' dni, maks. '+str(CONFIG['retention']['credentials_rows'])+' wpisów. Osobna baza jest dostępna tylko właścicielowi; nie jest objęta automatycznymi backupami telemetrii.</p><table><tr><th>Czas</th><th>IP</th><th>Login</th><th>Hasło</th></tr>'+ (body or '<tr><td colspan="4">Brak formularzy</td></tr>')+'</table><p>'+nav+'</p></section>')
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     initialize_db()
@@ -1268,6 +1364,7 @@ if __name__ == '__main__':
 PY
 cat > "$STAGE/config.example.json" <<'CONFIG'
 {
+  "capture_credentials": true,
   "listen_host": "0.0.0.0",
   "http_port": 31888,
   "endlessh_port": 41888,
@@ -1309,7 +1406,9 @@ cat > "$STAGE/config.example.json" <<'CONFIG'
     "http_rows": 30000,
     "endlessh_days": 90,
     "endlessh_rows": 100000,
-    "auth_days": 30
+    "auth_days": 30,
+    "credentials_days": 7,
+    "credentials_rows": 10000
   },
   "maintenance": {
     "interval_seconds": 3600,
@@ -1368,7 +1467,7 @@ rollback() {
 }
 rc-service frog-soc restart || rollback
 if ! python3 - <<'PY'
-import base64, importlib.util, pathlib, time, urllib.request, urllib.error
+import base64, contextlib, importlib.util, pathlib, secrets, sqlite3, time, urllib.request, urllib.error, urllib.parse
 spec=importlib.util.spec_from_file_location('verify','/opt/frog-soc/app.py')
 app=importlib.util.module_from_spec(spec);spec.loader.exec_module(app)
 password=pathlib.Path(app.PASSWORD_FILE).read_text().strip()
@@ -1376,7 +1475,7 @@ headers={'Authorization':'Basic '+base64.b64encode(('frog:'+password).encode()).
 base='http://127.0.0.1:'+str(app.PORT)
 for attempt in range(20):
     try:
-        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','5.0'),('/frog','XP'),('/assets/live.js','setInterval')]:
+        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','5.1'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
             request=urllib.request.Request(base+path,headers=headers)
             with urllib.request.urlopen(request,timeout=5) as response:
                 assert marker in response.read().decode(), path
@@ -1385,6 +1484,21 @@ for attempt in range(20):
             raise AssertionError('Nieprawidłowy filtr nie został odrzucony')
         except urllib.error.HTTPError as exc:
             assert exc.code==400
+        if app.CONFIG['capture_credentials']:
+            username='__frog_check__'+secrets.token_hex(8)
+            password=secrets.token_hex(16)
+            try:
+                data=urllib.parse.urlencode({'username':username,'password':password}).encode()
+                with urllib.request.urlopen(urllib.request.Request(base+'/login',data=data),timeout=5) as response:
+                    assert response.status==200
+                with contextlib.closing(sqlite3.connect(app.CREDENTIALS_DB)) as c:
+                    assert c.execute('SELECT COUNT(*) FROM submissions WHERE username=? AND password=?',(username,password)).fetchone()[0]==1
+            finally:
+                with contextlib.closing(sqlite3.connect(app.CREDENTIALS_DB)) as c:
+                    c.execute('DELETE FROM submissions WHERE username=?',(username,))
+                    c.commit()
+            assert pathlib.Path(app.CREDENTIALS_DB).stat().st_mode & 0o777 == 0o600
+            print('Zapis formularza i uprawnienia bazy: OK (wpis testowy usunięty)')
         print('HTTP, filtry, CSV, aktywność, konfiguracja, XP i JS: OK')
         break
     except Exception:
@@ -1399,7 +1513,7 @@ rc-service frog-soc status || rollback
 if command -v logrotate >/dev/null 2>&1 && [ -f "$STAGE/frog-soc.logrotate" ]; then
     cp "$STAGE/frog-soc.logrotate" /etc/logrotate.d/frog-soc
 fi
-printf 'Frog SOC 5.0 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
+printf 'Frog SOC 5.1 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
 DEPLOY
 cat > "$STAGE/frog-soc.logrotate" <<'ROTATION'
 /var/log/endlessh.log /var/log/frog-soc.log {

@@ -1,5 +1,13 @@
 # Zmiany
 
+## 5.1
+
+- Zapisywanie loginów i haseł z formularza pułapki routera.
+- Chroniony widok `/credentials`, osobna baza `600`, retencja 7 dni / 10 000 wpisów.
+- Dane formularzy pomijane w backupach telemetrii, logach HTTP i Discordzie.
+- Limity rozmiaru i czasu odczytu formularza oraz bezpieczne wyświetlanie HTML.
+- 24 testy, w tym testy przechwycenia, wyłączenia zbierania, retencji i kontroli dostępu.
+
 ## 5.0
 
 - Konfiguracja JSON z walidacją i zachowaniem ustawień przy aktualizacji.
