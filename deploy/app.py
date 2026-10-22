@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Frog SOC 4.0; stdlib-only Alpine/OpenRC mini SOC."""
+"""Frog SOC 5.0; stdlib-only Alpine/OpenRC mini SOC."""
 import base64
 import collections
+import copy
+import csv
+import io
+import logging
 import datetime
 import html
 import hashlib
@@ -21,13 +25,77 @@ import socket
 import subprocess
 import threading
 import time
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, urlencode
 
-ROOT = '/opt/frog-soc'
+VERSION = '5.0'
+DEFAULT_CONFIG = {
+    'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
+    'endlessh_logs': ['/var/log/endlessh.log*'],
+    'auth_logs': ['/var/log/auth.log', '/var/log/secure', '/var/log/messages'],
+    'trusted_networks': ['100.64.0.0/10'], 'page_size': 50,
+    'import_interval': 5, 'refresh_seconds': 15, 'geo_enabled': True,
+    'required_services': ['Frog SOC', 'Endlessh', 'Tailscale'],
+    'alerts': {'enabled': True, 'cooldown_seconds': 900, 'interval_seconds': 60,
+               'ram_percent': 85, 'disk_percent': 85, 'http_hour': 100,
+               'ip_hour': 50, 'ssh_hour': 10, 'burst_factor': 3,
+               'endlessh_record_seconds': 300, 'recovery': True},
+    'retention': {'http_days': 90, 'http_rows': 30000, 'endlessh_days': 90,
+                  'endlessh_rows': 100000, 'auth_days': 30},
+    'maintenance': {'interval_seconds': 3600, 'backup_hours': 24, 'backup_keep': 7}
+}
+ROOT = os.environ.get('FROG_ROOT', '/opt/frog-soc')
+CONFIG_PATH = os.environ.get('FROG_CONFIG', ROOT + '/config.json')
+
+
+def load_config(path):
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as f:
+            supplied = json.load(f)
+        def merge(target, data):
+            if not isinstance(data, dict):
+                raise ValueError('Konfiguracja musi być obiektem JSON')
+            for key, value in data.items():
+                if key not in target:
+                    raise ValueError('Nieznana opcja: '+key)
+                default = target[key]
+                if isinstance(default, dict):
+                    merge(default, value)
+                elif type(value) is not type(default):
+                    raise ValueError('Nieprawidłowy typ opcji: '+key)
+                else:
+                    target[key] = value
+        merge(config, supplied)
+    for key in ('http_port', 'endlessh_port'):
+        if not 1024 <= config[key] <= 65535:
+            raise ValueError(key+': wymagany port 1024–65535')
+    if config['http_port'] == config['endlessh_port']:
+        raise ValueError('Port Frog i Endlessh muszą być różne')
+    if not 1 <= config['page_size'] <= 200:
+        raise ValueError('page_size: wymagane 1–200')
+    for key in ('import_interval', 'refresh_seconds'):
+        if config[key] < 1:
+            raise ValueError(key+': wymagana dodatnia wartość')
+    for group in ('alerts', 'retention', 'maintenance'):
+        for key, value in config[group].items():
+            if type(value) is int and value < 1:
+                raise ValueError(group+'.'+key+': wymagana dodatnia wartość')
+    for key in ('ram_percent', 'disk_percent'):
+        if config['alerts'][key] > 100:
+            raise ValueError(key+': maksimum 100')
+    for key in ('endlessh_logs', 'auth_logs', 'trusted_networks', 'required_services'):
+        if not all(isinstance(v, str) and v for v in config[key]):
+            raise ValueError('Nieprawidłowa lista: '+key)
+    for network in config['trusted_networks']:
+        ipaddress.ip_network(network)
+    return config
+
+
+CONFIG = load_config(CONFIG_PATH)
 EVENTFILE = ROOT + '/events.jsonl'
 PASSWORD_FILE = ROOT + '/.soc-password'
-PORT = 31888
-TAILNET = ipaddress.ip_network('100.64.0.0/10')
+PORT = CONFIG['http_port']
+ENDLESSH_PORT = CONFIG['endlessh_port']
 EVENTS = collections.deque(maxlen=600)
 LOCK = threading.Lock()
 BOOT = time.time()
@@ -37,12 +105,14 @@ DB = ROOT + '/soc-history.sqlite3'
 WEBHOOK_FILE = ROOT + '/.discord-webhook'
 DB_LOCK = threading.Lock()
 GEO_LOCK = threading.Lock()
-ALERT_COOLDOWN = 900
-ALERT_STATE = {}
+ALERT_COOLDOWN = CONFIG['alerts']['cooldown_seconds']
 GEO_REFRESH = 86400 * 30
 ENDLESSH_ERROR = ''
 ENDLESSH_UPDATED = 0
-ENDLESSH_LOGS = ('/var/log/endlessh.log*',)
+ENDLESSH_SUCCESS = 0
+ENDLESSH_LOGS = CONFIG['endlessh_logs']
+MAINTENANCE_ERROR = ''
+AUTH_ERROR = ''
 
 
 class SOCConnection(sqlite3.Connection):
@@ -62,8 +132,16 @@ def db_connect():
     c.execute('CREATE TABLE IF NOT EXISTS geo (ip TEXT PRIMARY KEY, country TEXT, lat REAL, lon REAL, checked INTEGER)')
     c.execute('CREATE TABLE IF NOT EXISTS endlessh_sessions (id TEXT PRIMARY KEY, ip TEXT, port INTEGER, fd INTEGER, started REAL, ended REAL, seconds REAL)')
     c.execute('CREATE INDEX IF NOT EXISTS endlessh_started ON endlessh_sessions(started)')
-    c.execute('CREATE TABLE IF NOT EXISTS endlessh_seen (id TEXT PRIMARY KEY)')
+    c.execute('CREATE TABLE IF NOT EXISTS endlessh_seen (id TEXT PRIMARY KEY, ts REAL)')
+    if 'ts' not in {row[1] for row in c.execute('PRAGMA table_info(endlessh_seen)')}:
+        c.execute('ALTER TABLE endlessh_seen ADD COLUMN ts REAL')
     c.execute('CREATE TABLE IF NOT EXISTS endlessh_offsets (path TEXT PRIMARY KEY, device INTEGER, inode INTEGER, offset INTEGER)')
+    c.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    c.execute('CREATE TABLE IF NOT EXISTS alert_state (key TEXT PRIMARY KEY, active INTEGER, sent REAL)')
+    c.execute('CREATE TABLE IF NOT EXISTS auth_events (id TEXT PRIMARY KEY, ts REAL, ip TEXT)')
+    c.execute('CREATE INDEX IF NOT EXISTS auth_ts ON auth_events(ts)')
+    c.execute('CREATE INDEX IF NOT EXISTS endlessh_ip ON endlessh_sessions(ip, started)')
+    c.execute('CREATE INDEX IF NOT EXISTS events_ip ON events(ip, ts)')
     return c
 
 
@@ -83,8 +161,8 @@ def initialize_db():
                                     continue
                     except OSError:
                         pass
-            c.execute('DELETE FROM events WHERE ts < ?', (int(time.time()) - 90 * 86400,))
-            c.execute('DELETE FROM events WHERE rowid IN (SELECT rowid FROM events ORDER BY ts DESC LIMIT -1 OFFSET 30000)')
+            c.execute("INSERT OR IGNORE INTO meta VALUES ('http_lifetime', ?)", (str(c.execute('SELECT COUNT(*) FROM events').fetchone()[0]),))
+            c.execute("INSERT OR IGNORE INTO meta VALUES ('endlessh_lifetime', ?)", (str(c.execute('SELECT COUNT(*) FROM endlessh_sessions').fetchone()[0]),))
 
 
 def total_events():
@@ -113,41 +191,32 @@ def full_timeline(hours=48):
 
 
 def webhooks_notify(content):
+    if not os.path.isfile(WEBHOOK_FILE):
+        return False
     try:
         with open(WEBHOOK_FILE, encoding='utf-8') as f:
             url = f.read().strip()
         if not url.startswith('https://discord.com/api/webhooks/') and not url.startswith('https://discordapp.com/api/webhooks/'):
             return
         body = json.dumps({'content': content[:1800], 'allowed_mentions': {'parse': []}}).encode()
-        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/4.0'}, method='POST')
+        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/5.0'}, method='POST')
         with urllib.request.urlopen(req, timeout=6) as r:
             r.read(128)
+        return True
     except (OSError, ValueError, urllib.error.URLError):
-        pass
+        logging.exception('Discord: wysyłka nieudana')
+        return False
 
 
 def alert_worker():
     while True:
         try:
-            s = snapshot()
-            alerts = [msg for level, msg in threat_alerts(s) if level != 'INFO']
-            alerts += [svc['name'] + ': usluga niewykryta' for svc in s['services'] if not svc['ok']]
-            ssh = ssh_failures()
-            if ssh['count'] >= 10: alerts.append('SSH: >=10 nieudanych prob w dostepnych logach (' + str(ssh['count']) + ')')
-            for msg in alerts[:8]:
-                now = time.monotonic()
-                if now - ALERT_STATE.get(msg, -99999) > ALERT_COOLDOWN:
-                    ALERT_STATE[msg] = now
-                    webhooks_notify('🚨 **FROG SOC 4.0** | ' + msg)
-            # Keep disk bounded; full history is kept 90 days (or until user purges).
-            if int(time.time()) % 3600 < 65:
-                with DB_LOCK:
-                    with db_connect() as c:
-                        c.execute('DELETE FROM events WHERE ts < ?', (int(time.time()) - 90*86400,))
-                        c.execute('DELETE FROM events WHERE rowid IN (SELECT rowid FROM events ORDER BY ts DESC LIMIT -1 OFFSET 30000)')
+            import_auth_logs()
+            if CONFIG['alerts']['enabled']:
+                dispatch_alerts(alert_candidates())
         except Exception:
-            pass
-        time.sleep(60)
+            logging.exception('Worker alertów')
+        time.sleep(CONFIG['alerts']['interval_seconds'])
 
 
 def geo_lookup(ip):
@@ -164,7 +233,7 @@ def geo_lookup(ip):
                     old = c.execute('SELECT checked FROM geo WHERE ip=?',(safe_ip,)).fetchone()
                     if old and time.time()-old[0] < GEO_REFRESH: return
             # Third party geo service receives the public attacker IP; not credentials.
-            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/4.0'})
+            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/5.0'})
             with urllib.request.urlopen(req,timeout=3) as r:
                 data = json.load(r)
             if not data.get('success'): return
@@ -249,23 +318,27 @@ def endlessh_record(line, reference=None):
 
 def store_endlessh(c, record):
     key, kind, ip, port, fd, ts, seconds = record
-    if not c.execute('INSERT OR IGNORE INTO endlessh_seen VALUES (?)', (key,)).rowcount:
+    if not c.execute('INSERT OR IGNORE INTO endlessh_seen (id,ts) VALUES (?,?)', (key,ts)).rowcount:
         return
     if kind == 'ACCEPT':
+        if c.execute('SELECT 1 FROM endlessh_sessions WHERE ip=? AND port=? AND fd=? AND ended IS NOT NULL AND ABS(started-?)<2 LIMIT 1', (ip,port,fd,ts)).fetchone():
+            return
         c.execute('INSERT INTO endlessh_sessions VALUES (?,?,?,?,?,NULL,NULL)', (key, ip, port, fd, ts))
+        meta_increment(c, 'endlessh_lifetime')
     else:
         # Pair by full peer tuple and nearest start; fd alone is reused by Endlessh.
-        row = c.execute('SELECT id FROM endlessh_sessions WHERE ip=? AND port=? AND fd=? AND ended IS NULL AND started<=? ORDER BY ABS(started-?) LIMIT 1',
-                        (ip, port, fd, ts, ts-seconds)).fetchone()
+        row = c.execute('SELECT id FROM endlessh_sessions WHERE ip=? AND port=? AND fd=? AND ended IS NULL AND started<=? AND ABS(started-?)<2 ORDER BY ABS(started-?) LIMIT 1',
+                        (ip, port, fd, ts, ts-seconds, ts-seconds)).fetchone()
         if row:
             c.execute('UPDATE endlessh_sessions SET ended=?, seconds=? WHERE id=?', (ts, seconds, row[0]))
         else:
             # CLOSE is sufficient even when ACCEPT rotated away or logging began mid-session.
             c.execute('INSERT INTO endlessh_sessions VALUES (?,?,?,?,?,?,?)', (key, ip, port, fd, ts-seconds, ts, seconds))
+            meta_increment(c, 'endlessh_lifetime')
 
 
 def import_endlessh_logs():
-    global ENDLESSH_ERROR, ENDLESSH_UPDATED
+    global ENDLESSH_ERROR, ENDLESSH_UPDATED, ENDLESSH_SUCCESS
     paths = {p for pattern in ENDLESSH_LOGS for p in glob.glob(pattern)
              if os.path.isfile(p) and not p.endswith(('.gz', '.xz', '.bz2'))}
     errors = []
@@ -305,6 +378,8 @@ def import_endlessh_logs():
             errors.append(path+': '+str(exc))
     ENDLESSH_ERROR = '; '.join(errors) or ('' if paths else 'Nie znaleziono plików logów Endlessh/syslog.')
     ENDLESSH_UPDATED = time.time()
+    if paths and not errors:
+        ENDLESSH_SUCCESS = ENDLESSH_UPDATED
 
 
 def endlessh_worker():
@@ -314,48 +389,28 @@ def endlessh_worker():
             import_endlessh_logs()
         except Exception as exc:
             ENDLESSH_ERROR = 'Błąd importu Endlessh: '+str(exc)
-        time.sleep(5)
-
-
-def ssh_page(page=1):
-    data = ssh_failures()
-    ports, established = net_ports()
-    with DB_LOCK:
-        with db_connect() as c:
-            total = c.execute('SELECT COUNT(*) FROM endlessh_sessions').fetchone()[0]
-            pages = max(1, (total+49)//50)
-            page = min(max(1, page), pages)
-            sessions = c.execute('SELECT ip,port,started,ended,seconds FROM endlessh_sessions ORDER BY started DESC,id DESC LIMIT 50 OFFSET ?', ((page-1)*50,)).fetchall()
-    def stamp(ts):
-        return esc(datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')) if ts is not None else '—'
-    rows = ''.join('<tr><td>'+esc(ip)+'</td><td>'+str(port)+'</td><td>'+stamp(start)+'</td><td>'+stamp(end)+'</td><td>'+('%.3f s' % seconds if seconds is not None else 'brak CLOSE')+'</td></tr>' for ip,port,start,end,seconds in sessions)
-    nav = ('<a href="/ssh?page='+str(page-1)+'">← Nowsze</a> ' if page>1 else '')
-    nav += 'Strona '+str(page)+' / '+str(pages)
-    if page<pages:
-        nav += ' <a href="/ssh?page='+str(page+1)+'">Starsze →</a>'
-    status = '<p class="muted">Import co 5 s. Ostatnia próba: '+stamp(ENDLESSH_UPDATED or None)+'.</p>'
-    if ENDLESSH_ERROR:
-        status += '<p>'+esc(ENDLESSH_ERROR)+'</p>'
-    if not total:
-        status += '<p>Brak zapisanych połączeń. Endlessh wymaga logowania (-v -s lub LogLevel 1 i -s) do syslog, albo -v do /var/log/endlessh.log. Sprawdź README.</p>'
-    sshrows = ''.join('<tr><td>'+esc(ip)+'</td><td>'+str(n)+'</td></tr>' for ip,n in data['top_ips'])
-    return layout('🪤 SSH / Endlessh', '<section class="box"><h2>Historia Endlessh · port 41888</h2><p>Nasłuch: '+('TAK' if 41888 in ports else 'NIE')+' · Aktywne TCP: '+str(established[41888])+' · Zapisane sesje: '+str(total)+'</p>'+status+'<p class="muted">Czasy według strefy serwera. Długość pochodzi z CLOSE Endlessh; brak CLOSE oznacza sesję otwartą lub niekompletne logi. Historia SQLite pozostaje po restarcie, bez automatycznego usuwania.</p><table><tr><th>IP</th><th>Port źródłowy</th><th>Początek</th><th>Koniec</th><th>Długość</th></tr>'+ (rows or '<tr><td colspan="5">Brak danych</td></tr>')+'</table><p>'+nav+'</p></section><section class="box"><h2>Nieudane logowania sshd / Dropbear</h2><p>To osobne dane, niezależne od Endlessh: '+str(data['count'])+' wpisów.</p><table>'+sshrows+'</table></section>')
+        time.sleep(CONFIG['import_interval'])
 
 
 def history_page():
     series=full_timeline(48)
     maxi=max([x['events'] for x in series]+[1])
     rows=''.join('<tr><td>'+esc(x['hour'])+'</td><td><div style="height:10px;background:#00ffaa;width:'+str(round(100*x['events']/maxi))+'%"></div></td><td>'+str(x['events'])+'</td></tr>' for x in series)
-    return layout('📈 Historia ataków', '<section class="box"><h2>Historia 48h</h2><p>Łącznie w SQLite: '+str(total_events())+' zdarzeń, retencja 90 dni. Dotychczasowe pliki events.jsonl zostają nietknięte.</p><table>'+rows+'</table></section>')
+    return layout('📈 Historia ataków', '<section class="box"><h2>Historia 48h</h2><p>Łącznie w SQLite: '+str(total_events())+' zdarzeń, retencja według config.json. Dotychczasowe pliki events.jsonl zostają nietknięte.</p><table>'+rows+'</table></section>')
 
 
 def frog4():
-    count=total_events()
-    xp=count*10
+    with DB_LOCK:
+        with db_connect() as c:
+            count = int(meta_get(c, 'http_lifetime', '0'))
+            ssh_count = int(meta_get(c, 'endlessh_lifetime', '0'))
+    xp=count*10+ssh_count*5
     level=1+int(math.sqrt(xp/100))
     stage='🥚 Kijanka' if level<3 else '🐸 Żaba' if level<10 else '👑 Król żab' if level<25 else '🐉 Cyberżaba'
     badges=[name for limit,name in [(1,'Pierwszy skan'),(10,'Bot magnet'),(100,'Wartownik'),(500,'Obrońca'),(1000,'Soc master'),(5000,'Legendarny płaz')] if count>=limit]
-    return layout('🐸 Ewolucja', '<section class="box" style="text-align:center"><div style="font-size:84px">🐸</div><h2>'+esc(stage)+'</h2><div class="big">LEVEL '+str(level)+'</div><p>'+str(xp)+' XP · '+str(count)+' zapisanych ataków HTTP</p><h2>Odznaki</h2><p>'+esc(' 🏅 '.join(badges) or 'Brak')+'</p></section>')
+    if ssh_count >= 10: badges.append('Zaklinacz SSH')
+    if ssh_count >= 100: badges.append('Cierpliwy łowca')
+    return layout('🐸 Ewolucja', '<section class="box" style="text-align:center"><div style="font-size:84px">🐸</div><h2>'+esc(stage)+'</h2><div class="big">LEVEL '+str(level)+'</div><p>'+str(xp)+' XP · '+str(count)+' obserwacji HTTP · '+str(ssh_count)+' sesji Endlessh (liczniki trwałe)</p><h2>Odznaki</h2><p>'+esc(' 🏅 '.join(badges) or 'Brak')+'</p></section>')
 
 
 def load_events():
@@ -388,6 +443,7 @@ def log_event(ip, path, method):
         with DB_LOCK:
             with db_connect() as c:
                 c.execute('INSERT INTO events VALUES (?,?,?,?)', (event['ts'], event['ip'], event['path'], event['method']))
+                meta_increment(c, 'http_lifetime')
     except sqlite3.Error:
         pass
 
@@ -395,7 +451,7 @@ def log_event(ip, path, method):
 def trusted(ip):
     try:
         a = ipaddress.ip_address(ip)
-        return a.is_loopback or a in TAILNET
+        return a.is_loopback or any(a in ipaddress.ip_network(net) for net in CONFIG['trusted_networks'])
     except ValueError:
         return False
 
@@ -500,13 +556,13 @@ def snapshot():
         'uptime': uptime(), 'load1': load1,
         'services': [
             {'name': 'Frog SOC', 'ok': PORT in ports, 'detail': 'HTTP :' + str(PORT)},
-            {'name': 'Endlessh', 'ok': ('endlessh' in processes or 41888 in ports),
-             'detail': 'Połączenia established na :41888: ' + str(established[41888])},
+            {'name': 'Endlessh', 'ok': ENDLESSH_PORT in ports,
+             'detail': 'Połączenia established na :'+str(ENDLESSH_PORT)+': ' + str(established[ENDLESSH_PORT])},
             {'name': 'Gatus', 'ok': 'gatus' in processes, 'detail': 'Wykrywanie procesu (nie health check)'},
             {'name': 'Tailscale', 'ok': 'tailscaled' in processes, 'detail': 'Wykrywanie procesu (nie status tunelu)'},
         ],
         'listen_ports': sorted(ports)[:40],
-        'endlessh_connections': established[41888],
+        'endlessh_connections': established[ENDLESSH_PORT],
     }
     with LOCK:
         CACHE.update(at=now, data=result)
@@ -540,7 +596,7 @@ def process_top(limit=8):
 
 def ssh_failures():
     """Best effort: read local auth logs; avoid logging usernames or passwords."""
-    files = ['/var/log/auth.log', '/var/log/secure', '/var/log/messages']
+    files = CONFIG['auth_logs']
     matching = []
     seen = set()
     for fn in files:
@@ -576,41 +632,12 @@ def ssh_failures():
 
 
 def timeline():
-    with LOCK:
-        events = list(EVENTS)
-    now = int(time.time())
-    bins = [0] * 24
-    for e in events:
-        try:
-            ago = now - int(e['ts'])
-            if 0 <= ago < 86400:
-                bins[23 - ago // 3600] += 1
-        except (ValueError, TypeError, KeyError):
-            pass
-    start = now - now % 3600 - 23 * 3600
-    return [{'hour': time.strftime('%d.%m %H:00', time.localtime(start + i * 3600)),
-             'events': bins[i]} for i in range(24)]
+    return full_timeline(24)
 
 
 def threat_alerts(s=None):
-    s = s or snapshot()
-    m, d = s['mem'], s['disk']
-    mem_pct = m['used'] * 100 / max(m['total'], 1)
-    disk_pct = d['used'] * 100 / max(d['total'], 1)
-    ev, ips, _, last_hour = analytics()
-    alerts = []
-    if mem_pct >= 85:
-        alerts.append(('WYSOKI', 'RAM przekracza 85%'))
-    if disk_pct >= 85:
-        alerts.append(('WYSOKI', 'Dysk przekracza 85%'))
-    if last_hour >= 100:
-        alerts.append(('UWAGA', 'Dużo żądań HTTP w ciągu godziny: ' + str(last_hour)))
-    for ip, count in ips.most_common(5):
-        if count >= 50:
-            alerts.append(('UWAGA', 'IP ' + ip + ' wygenerowało ' + str(count) + ' żądań w buforze'))
-    if not alerts:
-        alerts.append(('INFO', 'Brak przekroczonych progów heurystycznych'))
-    return alerts
+    alerts = [('UWAGA', message) for _, message in alert_candidates(s)]
+    return alerts or [('INFO', 'Brak przekroczonych progów heurystycznych')]
 
 
 def investigations():
@@ -626,14 +653,14 @@ def investigations():
                     str(x['rss_mib']) + ' MiB</td></tr>' for x in ps)
     sshrows = ''.join('<tr><td>' + esc(ip) + '</td><td>' + str(n) + '</td></tr>' for ip, n in ssh['top_ips'])
     arows = ''.join('<li><b>' + esc(level) + '</b> — ' + esc(msg) + '</li>' for level, msg in alerts)
-    return layout('SOC 3.0 · Analiza zdarzeń',
+    return layout('SOC 5.0 · Analiza zdarzeń',
         "<div class='grid'><section class='box'><h2>🚨 Alarmy heurystyczne</h2><ul>" + arows +
         "</ul></section><section class='box'><h2>🔑 Nieudane SSH</h2><div class='big'>" + str(ssh['count']) +
         "</div><p class='muted'>" + esc(ssh['note']) + '</p><p class="muted">Logi: ' +
         esc(', '.join(ssh['sources']) or 'nie znaleziono / brak dostępu') +
         '</p><table><tr><th>IP</th><th>Wpisy</th></tr>' + sshrows +
         "</table></section></div><div class='grid'><section class='box'><h2>📈 Żądania HTTP — ostatnie 24h</h2>" +
-        '<p class="muted">Tylko zdarzenia znajdujące się w buforze (max 600), nie pełna historia.</p><table>' +
+        '<p class="muted">Zdarzenia z bazy SQLite, z uwzględnieniem retencji.</p><table>' +
         bars + "</table></section><section class='box'><h2>🧠 Procesy o najwyższym RSS</h2>" +
         '<p class="muted">RSS uwzględnia pamięć współdzieloną; sumy procesów mogą przekraczać rzeczywiste użycie.</p>' +
         '<table><tr><th>Proces</th><th>PID</th><th>RAM</th></tr>' + prows +
@@ -651,8 +678,8 @@ def duration(sec):
 def layout(title, content):
     return ("<!doctype html><html lang='pl'><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<meta http-equiv='refresh' content='30'>"
-        "<title>Frog SOC 4.0 — " + esc(title) + "</title><style>"
+        "<script defer src='/assets/live.js'></script>"
+        "<title>Frog SOC 5.0 — " + esc(title) + "</title><style>"
         ":root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#020d11;color:#c8ffe0;"
         "font:15px system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:20px}"
         "h1{font-size:27px;margin:12px 0}h2{font-size:17px;margin:0 0 14px}"
@@ -663,10 +690,11 @@ def layout(title, content):
         ".ok{color:#8deda8}.bad{color:#ffa48c}table{width:100%;border-collapse:collapse;font-size:13px}"
         "td,th{padding:9px;border-bottom:1px solid #28403b;text-align:left;word-break:break-word}"
         "progress{width:100%;height:12px;accent-color:#80f7bc}code{color:#b9fad2}"
-        "</style><main><nav><b>🐸 FROG SOC 4.0</b> &nbsp; "
+        "input,select,button{font:inherit;padding:9px;border-radius:6px;max-width:100%;background:#102c30;color:#dcffe9;border:1px solid #39665b}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}label{display:grid;gap:5px}nav{display:flex;flex-wrap:wrap;gap:8px}svg{max-width:100%}@media(max-width:600px){main{padding:10px}td,th{padding:7px}h1{font-size:22px}.grid{grid-template-columns:1fr}}"
+        "</style><main><nav><b>🐸 FROG SOC 5.0</b> &nbsp; "
         "<a href='/soc'>Centrum</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
-        "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/soc/json'>JSON</a></nav><h1>" + esc(title) + '</h1>' + content +
-        "<p class='muted'>Odświeżanie co 30 s · dostęp tylko z Tailscale/localhost + hasło</p>"
+        "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
+        "</article><p class='muted' id='live-status'>Aktualizacja w tle · dostęp Tailscale/localhost + hasło</p>"
         "</main></html>")
 
 
@@ -676,7 +704,9 @@ def analytics():
     counts = collections.Counter(str(e.get('ip', '?')) for e in ev)
     paths = collections.Counter(str(e.get('path', '?')) for e in ev)
     now = time.time()
-    last_hour = sum(1 for e in ev if 0 <= now - e.get('ts', 0) < 3600)
+    with DB_LOCK:
+        with db_connect() as c:
+            last_hour = c.execute('SELECT COUNT(*) FROM events WHERE ts BETWEEN ? AND ?', (now-3600, now)).fetchone()[0]
     return ev, counts, paths, last_hour
 
 
@@ -687,12 +717,12 @@ def center():
     mp = round(100 * m['used'] / max(1, m['total']))
     dp = round(100 * d['used'] / max(1, d['total']))
     alerts = []
-    if mp >= 85:
-        alerts.append('RAM przekracza 85%')
-    if dp >= 85:
-        alerts.append('Dysk przekracza 85%')
+    if mp >= CONFIG['alerts']['ram_percent']:
+        alerts.append('RAM przekracza próg konfiguracji')
+    if dp >= CONFIG['alerts']['disk_percent']:
+        alerts.append('Dysk przekracza próg konfiguracji')
     for svc in s['services']:
-        if not svc['ok']:
+        if not svc['ok'] and svc['name'] in CONFIG['required_services']:
             alerts.append(svc['name'] + ': niewykryta (sprawdź konfigurację)')
     blocks = [
         "<div class='box'><span class='muted'>RAM</span><div class='big'>" + str(m['used']) + ' / ' + str(m['total']) +
@@ -709,7 +739,7 @@ def center():
                        for x in s['services'])
     alarms = ''.join('<li>' + esc(x) + '</li>' for x in alerts) or '<li>Brak alertów progowych.</li>'
     return layout('Centrum dowodzenia',
-        "<section class='grid'>" + ''.join(blocks) + '</section>' +
+        traffic_chart() + "<section class='grid'>" + ''.join(blocks) + '</section>' +
         "<div class='grid'><section class='box'><h2>🛡️ Usługi</h2><table>" + services + '</table></section>' +
         "<section class='box'><h2>🚨 Alerty</h2><ul>" + alarms + '</ul></section></div>' +
         "<section class='box'><h2>Porty nasłuchujące na VPS</h2><p><code>" +
@@ -752,7 +782,7 @@ def old_frog():
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = 'FrogSOC/4.0'
+    server_version = 'FrogSOC/5.0'
     def log_message(self, *args):
         pass
 
@@ -765,7 +795,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
         if headers:
             for k, v in headers.items():
                 self.send_header(k, v)
@@ -796,8 +826,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def route(self):
         path = urlsplit(self.path).path
-        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh'):
+        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/assets/live.js'):
             if not self.authorized():
+                return
+            params = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+            try:
+                if path == '/assets/live.js':
+                    self.send(200, live_script(), 'application/javascript; charset=utf-8')
+                    return
+                if path == '/ssh.csv':
+                    self.send(200, endlessh_csv(params), 'text/csv; charset=utf-8', {'Content-Disposition': 'attachment; filename="endlessh.csv"'})
+                    return
+                if path == '/ssh':
+                    self.send(200, ssh_page(params=params))
+                    return
+                if path in ('/ip', '/activity', '/settings'):
+                    self.send(200, {'/ip': lambda: ip_page(params.get('ip', '')), '/activity': lambda: activity_page(params), '/settings': settings_page}[path]())
+                    return
+            except ValueError as exc:
+                self.send(400, layout('Nieprawidłowy filtr', '<p>'+esc(exc)+'</p>'))
                 return
             if path == '/soc/json':
                 s = snapshot().copy()
@@ -806,13 +853,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                           'top_ips': ips.most_common(10), 'top_paths': paths.most_common(10)})
                 self.send(200, json.dumps(s, ensure_ascii=False), 'application/json; charset=utf-8')
             else:
-                if path == '/ssh':
-                    try:
-                        page = int(parse_qs(urlsplit(self.path).query).get('page', ['1'])[0])
-                    except ValueError:
-                        page = 1
-                    self.send(200, ssh_page(page))
-                    return
                 self.send(200, {'/soc': center, '/stats': stats, '/frog': frog, '/investigate': investigations, '/geo': geo_page, '/history': history_page, '/ssh': ssh_page}[path]())
             return
         if path == '/health':
@@ -850,11 +890,370 @@ class Server(http.server.ThreadingHTTPServer):
             MAX_ACTIVE.release()
 
 
+def meta_get(c, key, default=''):
+    row = c.execute('SELECT value FROM meta WHERE key=?', (key,)).fetchone()
+    return row[0] if row else default
+
+
+def meta_set(c, key, value):
+    c.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', (key, str(value)))
+
+
+def meta_increment(c, key):
+    c.execute('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1', (key, '1'))
+
+
+def canonical_ip(ip):
+    addr = ipaddress.ip_address(ip)
+    return str(addr.ipv4_mapped if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped else addr)
+
+
+def ip_variants(ip):
+    value = canonical_ip(ip)
+    return [value, '::ffff:'+value] if ':' not in value else [value]
+
+
+def ip_link(ip):
+    return '<a href="/ip?'+esc(urlencode({'ip': canonical_ip(ip)}))+'">'+esc(ip)+'</a>'
+
+
+def stamp(ts):
+    return datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') if ts is not None else '—'
+
+
+def session_filter(params):
+    clauses, values = [], []
+    if params.get('ip'):
+        variants = ip_variants(params['ip'].strip())
+        clauses.append('ip IN ('+','.join('?' for _ in variants)+')')
+        values.extend(variants)
+    dates = {}
+    for key, op in (('from', '>='), ('to', '<')):
+        if params.get(key):
+            try:
+                day = datetime.datetime.strptime(params[key], '%Y-%m-%d')
+            except ValueError:
+                raise ValueError('Data musi mieć format RRRR-MM-DD')
+            dates[key] = day
+            if key == 'to':
+                day += datetime.timedelta(days=1)
+            clauses.append('started '+op+' ?')
+            values.append(day.timestamp())
+    if dates.get('from') and dates.get('to') and dates['from'] > dates['to']:
+        raise ValueError('Początek zakresu jest późniejszy niż koniec')
+    status = params.get('status', '')
+    if status not in ('', 'closed', 'pending'):
+        raise ValueError('Nieznany status sesji')
+    if status:
+        clauses.append('ended IS '+('NOT NULL' if status == 'closed' else 'NULL'))
+    if params.get('min_seconds'):
+        try:
+            seconds = float(params['min_seconds'])
+        except ValueError:
+            raise ValueError('Długość musi być liczbą')
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError('Długość musi być nieujemną liczbą')
+        clauses.append('seconds>=?')
+        values.append(seconds)
+    sort = params.get('sort', 'newest')
+    orders = {'newest': 'started DESC,id DESC', 'longest': 'seconds DESC,started DESC,id DESC'}
+    if sort not in orders:
+        raise ValueError('Nieznane sortowanie')
+    return (' WHERE '+' AND '.join(clauses) if clauses else ''), values, orders[sort]
+
+
+def session_rows(params, page=1, export=False):
+    where, values, order = session_filter(params)
+    with DB_LOCK:
+        with db_connect() as c:
+            total = c.execute('SELECT COUNT(*) FROM endlessh_sessions'+where, values).fetchone()[0]
+            pages = max(1, (total+CONFIG['page_size']-1)//CONFIG['page_size'])
+            page = min(max(1, page), pages)
+            limit = CONFIG['retention']['endlessh_rows'] if export else CONFIG['page_size']
+            rows = c.execute('SELECT ip,port,started,ended,seconds FROM endlessh_sessions'+where+' ORDER BY '+order+' LIMIT ? OFFSET ?', values+[limit, 0 if export else (page-1)*limit]).fetchall()
+    return rows, total, page, pages
+
+
+def endlessh_csv(params):
+    rows, _, _, _ = session_rows(params, export=True)
+    stream = io.StringIO(newline='')
+    writer = csv.writer(stream)
+    writer.writerow(['ip', 'client_port', 'started_server_time', 'ended_server_time', 'duration_seconds'])
+    for ip, port, start, end, seconds in rows:
+        writer.writerow([ip, port, stamp(start), stamp(end), '' if seconds is None else '%.3f' % seconds])
+    return '\ufeff'+stream.getvalue()
+
+
+def filter_form(params):
+    def field(name, label, kind='text'):
+        return '<label>'+label+'<input name="'+name+'" type="'+kind+'" value="'+esc(params.get(name, ''))+'"></label>'
+    options = lambda name, choices: '<select name="'+name+'">'+''.join('<option value="'+v+'"'+(' selected' if params.get(name, '')==v else '')+'>'+label+'</option>' for v,label in choices)+'</select>'
+    return '<form method="get" action="/ssh">'+field('ip','Adres IP')+field('from','Od','date')+field('to','Do','date')+field('min_seconds','Minimum sekund','number')+'<label>Status'+options('status',[('', 'Wszystkie'),('closed','Zakończone'),('pending','Bez CLOSE')])+'</label><label>Kolejność'+options('sort',[('newest','Najnowsze'),('longest','Najdłuższe')])+'</label><button>Filtruj</button><a href="/ssh">Wyczyść</a></form>'
+
+
+def ssh_page(page=1, params=None):
+    params = params or {}
+    try:
+        page = int(params.get('page', page))
+    except (ValueError, TypeError):
+        raise ValueError('Nieprawidłowy numer strony')
+    rows, total, page, pages = session_rows(params, page)
+    ports, established = net_ports()
+    table = ''.join('<tr><td>'+ip_link(ip)+'</td><td>'+str(port)+'</td><td>'+stamp(start)+'</td><td>'+stamp(end)+'</td><td>'+('%.3f s' % seconds if seconds is not None else 'brak CLOSE')+'</td></tr>' for ip,port,start,end,seconds in rows)
+    nav = ''
+    for target, label in ((page-1,'← Nowsze'), (page+1,'Starsze →')):
+        if 1 <= target <= pages:
+            nav += '<a href="/ssh?'+esc(urlencode(dict(params, page=target)))+'">'+label+'</a> '
+    nav += 'Strona '+str(page)+' / '+str(pages)
+    status = '<p>Ostatni poprawny odczyt: '+stamp(ENDLESSH_SUCCESS or None)+' · interwał '+str(CONFIG['import_interval'])+' s</p>'
+    if ENDLESSH_ERROR:
+        status += '<p class="bad">'+esc(ENDLESSH_ERROR)+'</p>'
+    if not total:
+        status += '<p>Brak zapisanych połączeń dla tych filtrów. Sprawdź logowanie Endlessh (-v) i ścieżkę logu.</p>'
+    with DB_LOCK:
+        with db_connect() as c:
+            top = c.execute('SELECT ip,COUNT(*),MAX(seconds),SUM(COALESCE(seconds,0)) FROM endlessh_sessions GROUP BY ip ORDER BY COUNT(*) DESC LIMIT 10').fetchall()
+    ranking = ''.join('<tr><td>'+ip_link(ip)+'</td><td>'+str(n)+'</td><td>'+('%.3f s' % longest if longest is not None else '—')+'</td><td>%.3f s</td></tr>' % summed for ip,n,longest,summed in top)
+    failures = ssh_failures()
+    authrows = ''.join('<tr><td>'+ip_link(ip)+'</td><td>'+str(n)+'</td></tr>' for ip,n in failures['top_ips'])
+    return layout('🪤 SSH / Endlessh', '<section class="box"><h2>Historia Endlessh · port '+str(ENDLESSH_PORT)+'</h2><p>Nasłuch: '+('TAK' if ENDLESSH_PORT in ports else 'NIE')+' · aktywne TCP: '+str(established[ENDLESSH_PORT])+' · pasujące sesje: '+str(total)+'</p>'+filter_form(params)+status+'<p><a href="/ssh.csv?'+esc(urlencode({k:v for k,v in params.items() if k!='page'}))+'">Eksport CSV z filtrami</a></p><p class="muted">Czas w strefie serwera. Brak CLOSE: połączenie otwarte lub niekompletne logi. Retencja: '+str(CONFIG['retention']['endlessh_days'])+' dni / '+str(CONFIG['retention']['endlessh_rows'])+' sesji.</p><table><tr><th>IP</th><th>Port źródłowy</th><th>Początek</th><th>Koniec</th><th>Długość</th></tr>'+ (table or '<tr><td colspan="5">Brak danych</td></tr>')+'</table><p>'+nav+'</p></section><section class="box"><h2>Powracające IP · zachowana historia</h2><table><tr><th>IP</th><th>Sesje</th><th>Najdłuższa</th><th>Łącznie</th></tr>'+ranking+'</table></section><section class="box"><h2>Nieudane logowania sshd / Dropbear</h2><p>Osobna próbka logów: '+str(failures['count'])+'</p><table>'+authrows+'</table></section>')
+
+
+def ip_page(ip):
+    variants = ip_variants(ip)
+    placeholders = ','.join('?' for _ in variants)
+    with DB_LOCK:
+        with db_connect() as c:
+            summary = c.execute('SELECT COUNT(*),MIN(started),MAX(started),SUM(COALESCE(seconds,0)),MAX(seconds) FROM endlessh_sessions WHERE ip IN ('+placeholders+')', variants).fetchone()
+            http = c.execute('SELECT COUNT(*),MIN(ts),MAX(ts) FROM events WHERE ip IN ('+placeholders+')',variants).fetchone()
+            auth = c.execute('SELECT COUNT(*) FROM auth_events WHERE ip IN ('+placeholders+')',variants).fetchone()[0]
+    count, first, last, seconds, longest = summary
+    return layout('Adres IP · '+canonical_ip(ip), '<section class="box"><p>Sesje Endlessh: <b>'+str(count)+'</b> · HTTP: <b>'+str(http[0])+'</b> · błędy SSH: <b>'+str(auth)+'</b></p><p>Pierwsza sesja: '+stamp(first)+' · ostatnia: '+stamp(last)+'</p><p>Łączny czas zakończonych sesji: %.3f s · najdłuższa: %.3f s</p>' % (seconds or 0,longest or 0)+'<a href="/ssh?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wszystkie zachowane sesje tego IP</a> · <a href="/activity?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wspólna oś aktywności IP</a><p class="muted">Podsumowanie dotyczy danych dostępnych w okresie retencji.</p></section>')
+
+
+def import_auth_logs():
+    global AUTH_ERROR
+    errors = []
+    for path in CONFIG['auth_logs']:
+        try:
+            if not os.path.exists(path):
+                continue
+            with open(path,'rb') as f:
+                st=os.fstat(f.fileno())
+                f.seek(max(0,st.st_size-262144))
+                if st.st_size>262144:
+                    f.readline()
+                lines=f.read().decode('utf-8','replace').splitlines()
+            with DB_LOCK:
+                with db_connect() as c:
+                    for line in lines:
+                        if not re.search(r'\b(sshd|dropbear)(?:\[\d+\])?:',line) or not any(x in line.lower() for x in ('failed password','invalid user','authentication failure','login attempt','bad password')):
+                            continue
+                        m=re.search(r'(?:from\s+|rhost=)([0-9a-fA-F:.]+)',line)
+                        if not m:
+                            continue
+                        try:
+                            ip=canonical_ip(m[1])
+                            # Reuse the timestamp parser for ISO / RFC3164 without persisting usernames.
+                            prefix=re.sub(r'\b(?:sshd|dropbear)(?:\[\d+\])?:.*', 'endlessh: ', line)
+                            record=endlessh_record(prefix+'ACCEPT host='+ip+' port=1 fd=0',st.st_mtime)
+                            if record:
+                                key=hashlib.sha256((str(record[5])+line).encode()).hexdigest()
+                                c.execute('INSERT OR IGNORE INTO auth_events VALUES (?,?,?)',(key,record[5],ip))
+                        except (ValueError,OverflowError):
+                            continue
+        except (OSError,sqlite3.Error) as exc:
+            errors.append(path+': '+str(exc))
+    AUTH_ERROR='; '.join(errors)
+
+
+def activity_page(params=None):
+    params=params or {}
+    values=[]
+    where=''
+    if params.get('ip'):
+        variants=ip_variants(params['ip'])
+        where=' WHERE ip IN ('+','.join('?' for _ in variants)+')'
+        values=variants
+    with DB_LOCK:
+        with db_connect() as c:
+            rows=c.execute("SELECT * FROM (SELECT ts,ip,'HTTP' AS kind,method||' '||path AS detail FROM events"+where+" UNION ALL SELECT started,ip,'Endlessh',CASE WHEN seconds IS NULL THEN 'brak CLOSE' ELSE printf('%.3f s',seconds) END FROM endlessh_sessions"+where+" UNION ALL SELECT ts,ip,'SSH auth','Nieudana próba logowania' FROM auth_events"+where+") ORDER BY 1 DESC LIMIT 200",values*3).fetchall()
+    body=''.join('<tr><td>'+stamp(ts)+'</td><td>'+ip_link(ip)+'</td><td>'+esc(kind)+'</td><td>'+esc(detail)+'</td></tr>' for ts,ip,kind,detail in rows)
+    return layout('Wspólna aktywność', '<section class="box"><p>200 najnowszych zdarzeń HTTP, Endlessh i sshd/Dropbear. '+('Filtr IP: '+esc(params['ip']) if params.get('ip') else '')+'</p><table><tr><th>Czas</th><th>IP</th><th>Źródło</th><th>Zdarzenie</th></tr>'+body+'</table></section>')
+
+
+def alert_candidates(s=None):
+    s=s or snapshot()
+    thresholds=CONFIG['alerts']
+    now=time.time()
+    result=[]
+    for key,metric,threshold in (('ram',s['mem']['used']*100/max(s['mem']['total'],1),thresholds['ram_percent']),('disk',s['disk']['used']*100/max(s['disk']['total'],1),thresholds['disk_percent'])):
+        if metric>=threshold:
+            result.append((key, key.upper()+': '+str(round(metric))+'% (próg '+str(threshold)+'%)'))
+    for service in s['services']:
+        if service['name'] in CONFIG['required_services'] and not service['ok']:
+            result.append(('service:'+service['name'],service['name']+': usługa niewykryta'))
+    with DB_LOCK:
+        with db_connect() as c:
+            hour=c.execute('SELECT COUNT(*) FROM events WHERE ts BETWEEN ? AND ?',(now-3600,now)).fetchone()[0]
+            previous=c.execute('SELECT COUNT(*) FROM events WHERE ts>=? AND ts<?',(now-7200,now-3600)).fetchone()[0]
+            ips=c.execute('SELECT ip,COUNT(*) FROM events WHERE ts BETWEEN ? AND ? GROUP BY ip HAVING COUNT(*)>=? ORDER BY COUNT(*) DESC LIMIT 5',(now-3600,now,thresholds['ip_hour'])).fetchall()
+            ssh=c.execute('SELECT COUNT(*) FROM auth_events WHERE ts BETWEEN ? AND ?',(now-3600,now)).fetchone()[0]
+            longest=c.execute('SELECT MAX(seconds) FROM endlessh_sessions').fetchone()[0] or 0
+            record=float(meta_get(c,'endlessh_record_notified','0'))
+    if hour>=thresholds['http_hour']:
+        result.append(('http:hour',str(hour)+' żądań HTTP / godzinę'))
+    if hour>=thresholds['http_hour'] and hour>=max(previous,1)*thresholds['burst_factor']:
+        result.append(('http:burst','Nagły wzrost HTTP: '+str(hour)+' wobec '+str(previous)+' w poprzedniej godzinie'))
+    result.extend(('ip:'+canonical_ip(ip),'IP '+ip+': '+str(count)+' żądań / godzinę') for ip,count in ips)
+    if ssh>=thresholds['ssh_hour']:
+        result.append(('ssh:hour',str(ssh)+' nieudanych logowań SSH / godzinę'))
+    if longest>=thresholds['endlessh_record_seconds'] and longest>record:
+        result.append(('endlessh:record','Nowy rekord sesji Endlessh: %.3f s' % longest))
+    if ENDLESSH_ERROR:
+        result.append(('import:endlessh','Błąd odczytu logów Endlessh: '+ENDLESSH_ERROR))
+    if MAINTENANCE_ERROR:
+        result.append(('maintenance','Błąd utrzymania / backupu: '+MAINTENANCE_ERROR))
+    return result
+
+
+def dispatch_alerts(alerts, now=None):
+    now=time.time() if now is None else now
+    current=dict(alerts)
+    with DB_LOCK:
+        with db_connect() as c:
+            prior={key:(active,sent) for key,active,sent in c.execute('SELECT key,active,sent FROM alert_state')}
+    for key,message in current.items():
+        active,sent=prior.get(key,(0,0))
+        if not active or now-sent>=CONFIG['alerts']['cooldown_seconds']:
+            if webhooks_notify('🚨 **FROG SOC 5.0** | '+message):
+                with DB_LOCK:
+                    with db_connect() as c:
+                        c.execute('INSERT OR REPLACE INTO alert_state VALUES (?,?,?)',(key,1,now))
+                        if key=='endlessh:record':
+                            meta_set(c,'endlessh_record_notified',c.execute('SELECT COALESCE(MAX(seconds),0) FROM endlessh_sessions').fetchone()[0])
+    for key,(active,sent) in prior.items():
+        if active and key not in current:
+            # Record notices are one-shot observations, not incidents requiring recovery.
+            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 5.0** | Ustąpił alert: '+key):
+                with DB_LOCK:
+                    with db_connect() as c:
+                        c.execute('UPDATE alert_state SET active=0 WHERE key=?',(key,))
+
+
+def maintenance_once(now=None):
+    now=time.time() if now is None else now
+    retention=CONFIG['retention']
+    with DB_LOCK:
+        with db_connect() as c:
+            for table,column,days,limit in (('events','ts',retention['http_days'],retention['http_rows']),('endlessh_sessions','started',retention['endlessh_days'],retention['endlessh_rows']),('auth_events','ts',retention['auth_days'],None)):
+                c.execute('DELETE FROM '+table+' WHERE '+column+'<?',(now-days*86400,))
+                if limit:
+                    c.execute('DELETE FROM '+table+' WHERE rowid IN (SELECT rowid FROM '+table+' ORDER BY '+column+' DESC LIMIT -1 OFFSET ?)',(limit,))
+            # Drop old dedup keys only when all source files are consumed; cursor prevents replay.
+            c.execute('DELETE FROM endlessh_seen WHERE ts<?',(now-retention['endlessh_days']*86400,))
+            c.execute('DELETE FROM geo WHERE checked<?',(now-90*86400,))
+            c.execute('DELETE FROM alert_state WHERE active=0 AND sent<?',(now-30*86400,))
+            backup_due=now-float(meta_get(c,'last_backup','0'))>=CONFIG['maintenance']['backup_hours']*3600
+    if backup_due:
+        directory=ROOT+'/backups/automatic'
+        os.makedirs(directory,mode=0o700,exist_ok=True)
+        filename=directory+'/soc-'+time.strftime('%Y%m%d-%H%M%S',time.localtime(now))+'.sqlite3'
+        temp=filename+'.tmp'
+        try:
+            with DB_LOCK:
+                with db_connect() as src:
+                    dst=sqlite3.connect(temp)
+                    try:
+                        src.backup(dst)
+                    finally:
+                        dst.close()
+            os.chmod(temp,0o600)
+            os.replace(temp,filename)
+        finally:
+            if os.path.exists(temp): os.unlink(temp)
+        with DB_LOCK:
+            with db_connect() as c:
+                meta_set(c,'last_backup',now)
+        backups=sorted(glob.glob(directory+'/soc-*.sqlite3'),reverse=True)
+        for old in backups[CONFIG['maintenance']['backup_keep']:]:
+            os.unlink(old)
+    with DB_LOCK:
+        with db_connect() as c:
+            meta_set(c,'last_maintenance',now)
+            c.execute('PRAGMA incremental_vacuum(100)')
+
+
+def maintenance_worker():
+    global MAINTENANCE_ERROR
+    while True:
+        try:
+            maintenance_once()
+            MAINTENANCE_ERROR=''
+        except Exception as exc:
+            MAINTENANCE_ERROR=str(exc)
+            logging.exception('Utrzymanie')
+        time.sleep(CONFIG['maintenance']['interval_seconds'])
+
+
+def settings_page():
+    with DB_LOCK:
+        with db_connect() as c:
+            backup=meta_get(c,'last_backup','0')
+            maintenance=meta_get(c,'last_maintenance','0')
+    return layout('Stan i konfiguracja', '<section class="box"><p>Wersja '+VERSION+' · konfiguracja: '+esc(CONFIG_PATH)+'</p><p>Port Frog: '+str(PORT)+' · port Endlessh: '+str(ENDLESSH_PORT)+'</p><p>Poprawny odczyt Endlessh: '+stamp(ENDLESSH_SUCCESS or None)+'</p><p>Backup SQLite: '+stamp(float(backup) or None)+' · utrzymanie: '+stamp(float(maintenance) or None)+'</p><p class="bad">'+esc(ENDLESSH_ERROR or MAINTENANCE_ERROR or AUTH_ERROR)+'</p><p>Zmiany pliku wymagają restartu Frog SOC. Konfiguracja nie przestawia usługi Endlessh ani reguł NAT/firewall.</p><pre>'+esc(json.dumps(CONFIG,ensure_ascii=False,indent=2))+'</pre></section>')
+
+
+def live_script():
+    return """(() => {
+const interval = INTERVAL;
+let busy = false;
+setInterval(async () => {
+  if (busy || document.hidden || document.activeElement?.closest('form')) return;
+  if (document.querySelector('form[data-dirty]')) return;
+  busy = true;
+  const status = document.getElementById('live-status');
+  try {
+    const response = await fetch(location.href, {cache: 'no-store', credentials: 'same-origin'});
+    if (!response.ok) throw new Error(String(response.status));
+    const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+    const next = doc.getElementById('live-content');
+    if (next) document.getElementById('live-content').replaceChildren(...next.childNodes);
+    if (status) status.textContent = 'Zaktualizowano: ' + new Date().toLocaleTimeString();
+  } catch (_) { if (status) status.textContent = 'Brak aktualizacji — sprawdź połączenie'; }
+  finally { busy = false; }
+}, interval);
+document.addEventListener('input', event => { const form = event.target.closest('form'); if(form) form.dataset.dirty='1'; });
+})();""".replace('INTERVAL',str(CONFIG['refresh_seconds']*1000))
+
+
+def traffic_chart():
+    now=int(time.time())//3600*3600
+    start=now-23*3600
+    with DB_LOCK:
+        with db_connect() as c:
+            http=dict(c.execute('SELECT CAST(ts/3600 AS INT)*3600,COUNT(*) FROM events WHERE ts>=? GROUP BY 1',(start,)))
+            ssh=dict(c.execute('SELECT CAST(started/3600 AS INT)*3600,COUNT(*) FROM endlessh_sessions WHERE started>=? GROUP BY 1',(start,)))
+    maximum=max(list(http.values())+list(ssh.values())+[1])
+    bars=[]
+    for i in range(24):
+        ts=start+i*3600
+        for offset,series,color,name in ((0,http,'#7af7b7','HTTP'),(9,ssh,'#7db9ff','Endlessh')):
+            value=series.get(ts,0)
+            height=130*value/maximum
+            bars.append('<rect x="'+str(12+i*24+offset)+'" y="'+str(150-height)+'" width="8" height="'+str(height)+'" fill="'+color+'"><title>'+esc(time.strftime('%d.%m %H:00',time.localtime(ts)))+' '+name+': '+str(value)+'</title></rect>')
+    return '<section class="box"><h2>Aktywność · 24 godziny</h2><p>Zielony: HTTP · niebieski: sesje Endlessh. Dane z SQLite.</p><svg role="img" aria-label="Godzinowa aktywność HTTP i Endlessh z ostatnich 24 godzin" viewBox="0 0 600 175">'+''.join(bars)+'<text x="12" y="170" fill="#c8ffe0">−23h</text><text x="530" y="170" fill="#c8ffe0">teraz</text></svg></section>'
+
+
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     initialize_db()
     load_events()
-    threading.Thread(target=alert_worker, daemon=True).start()
-    threading.Thread(target=geo_worker, daemon=True).start()
-    threading.Thread(target=endlessh_worker, daemon=True).start()
-    with Server(('0.0.0.0', PORT), Handler) as server:
+    # Bind first: monitoring must not report our own not-yet-started listener as failed.
+    with Server((CONFIG['listen_host'], PORT), Handler) as server:
+        threading.Thread(target=alert_worker, daemon=True).start()
+        if CONFIG['geo_enabled']:
+            threading.Thread(target=geo_worker, daemon=True).start()
+        threading.Thread(target=maintenance_worker, daemon=True).start()
+        threading.Thread(target=endlessh_worker, daemon=True).start()
         server.serve_forever(poll_interval=0.5)

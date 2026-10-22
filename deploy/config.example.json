@@ -1,0 +1,50 @@
+{
+  "listen_host": "0.0.0.0",
+  "http_port": 31888,
+  "endlessh_port": 41888,
+  "endlessh_logs": [
+    "/var/log/endlessh.log*"
+  ],
+  "auth_logs": [
+    "/var/log/auth.log",
+    "/var/log/secure",
+    "/var/log/messages"
+  ],
+  "trusted_networks": [
+    "100.64.0.0/10"
+  ],
+  "page_size": 50,
+  "import_interval": 5,
+  "refresh_seconds": 15,
+  "geo_enabled": true,
+  "required_services": [
+    "Frog SOC",
+    "Endlessh",
+    "Tailscale"
+  ],
+  "alerts": {
+    "enabled": true,
+    "cooldown_seconds": 900,
+    "interval_seconds": 60,
+    "ram_percent": 85,
+    "disk_percent": 85,
+    "http_hour": 100,
+    "ip_hour": 50,
+    "ssh_hour": 10,
+    "burst_factor": 3,
+    "endlessh_record_seconds": 300,
+    "recovery": true
+  },
+  "retention": {
+    "http_days": 90,
+    "http_rows": 30000,
+    "endlessh_days": 90,
+    "endlessh_rows": 100000,
+    "auth_days": 30
+  },
+  "maintenance": {
+    "interval_seconds": 3600,
+    "backup_hours": 24,
+    "backup_keep": 7
+  }
+}
