@@ -1,4 +1,4 @@
-# 🐸 Frog SOC 5.1
+# 🐸 Frog SOC 5.2
 
 [Polski](README.md) · **English**
 
@@ -8,6 +8,45 @@ SSH tarpit, a shared event timeline, Discord alerts and a frog that earns XP.
 Python standard library only; no pip, Node.js or Docker required.
 
 Frog observes and alerts. It does not block IPs or replace a firewall or SIEM.
+
+## New in 5.2
+
+- **Login attempt statistics** (`/credential-stats`): attempt and distinct-IP
+  counts, top 20 usernames, passwords and combinations, plus distinct IPs per
+  combination. These protected statistics use retained submissions only.
+- **Similar bot patterns** (`/campaigns`): matching username/password pairs
+  across different IPs and similar HTTP path families. Default window: 24 hours,
+  at least 2 IPs and 3 attempts. Path families cover WordPress, CGI/router,
+  login panels and paths with numeric identifiers. Similarity is a heuristic,
+  not proof of common attribution. Up to 20 groups and 20 IPs per group are shown.
+- **Daily Discord report** (`/reports`): defaults to **20:00 in the server timezone**,
+  covering the previous complete calendar day. It includes HTTP, Endlessh and
+  failed-SSH counts, the longest session started that day, newly observed IPs
+  within retained history, submission count and currently active alert count.
+  Submitted usernames and passwords are never included. Requires `.discord-webhook`.
+- **Submission deletion** (`/credentials`): delete selected records or the entire
+  history as it existed when the form was opened, across all pages. Type `USUN`
+  and select the appropriate button. Deletion requires authentication and a
+  signed token valid for 30 minutes; GET never deletes data. Submissions captured
+  after the form was opened remain untouched. Deletion cannot be undone.
+  Reopen the form after a service restart.
+
+New settings can be added to an existing `config.json`:
+
+```json
+{
+  "daily_report": {"enabled": true, "hour": 20, "minute": 0},
+  "campaigns": {"window_hours": 24, "min_ips": 2, "min_attempts": 3}
+}
+```
+
+The report scheduler checks every minute. The last successfully reported day
+is persisted in SQLite, so a restart does not resend it. Failed delivery is
+retried; a timeout after Discord accepts a message can cause a duplicate.
+After downtime, only the latest complete day is reported, without replaying
+the entire backlog. `/reports` provides a preview and delivery status.
+Statistics and pattern detection respect data retention; deleted submissions
+also disappear from those summaries.
 
 ## New in 5.1: router honeypot form capture
 
@@ -181,9 +220,9 @@ updater described below.
 Requires `/opt/frog-soc/app.py`, `.soc-password` and the `frog-soc` service.
 
 ```sh
-scp -r deploy USER@VPS:~/frog-update-v51
+scp -r deploy USER@VPS:~/frog-update-v52
 ssh USER@VPS
-sudo sh ~/frog-update-v51/deploy.sh
+sudo sh ~/frog-update-v52/deploy.sh
 ```
 
 For a nonstandard administration port, use `scp -P PORT` and `ssh -p PORT`,
@@ -204,7 +243,7 @@ A standalone generated updater is also available:
 sudo sh update-frog-soc-4.sh
 ```
 
-The filename is retained for compatibility; it installs **5.1** using the same
+The filename is retained for compatibility; it installs **5.2** using the same
 backup and validation procedure as `deploy/deploy.sh`.
 
 ## Access and dashboard routes
@@ -233,6 +272,9 @@ Then open `http://127.0.0.1:8080/soc`.
 | `/ssh.csv` | CSV using the history filters |
 | `/ip?ip=ADDRESS` | Per-IP summary |
 | `/activity` | Latest 200 HTTP/Endlessh/SSH events; optional `ip` filter |
+| `/credential-stats` | Username, password and combination statistics |
+| `/campaigns` | Similar attempt patterns across different IPs |
+| `/reports` | Daily Discord report preview and status |
 | `/credentials` | Usernames/passwords submitted to the fake router form |
 | `/settings` | Configuration, importer, backup and maintenance status |
 | `/stats` | Recent HTTP and buffer rankings; hourly count from SQLite |
@@ -335,9 +377,10 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-24 tests cover log import/rotation, IPv6, filters/CSV, configuration validation,
+33 tests cover log import/rotation, IPv6, filters/CSV, configuration validation,
 persistent alerts/XP, SQLite backups, authenticated HTTP routes, submission
-capture, access control and retention. HTTP tests require local TCP sockets.
+capture, access control, retention, statistics, pattern grouping, report scheduling
+and confirmed deletion with CSRF tokens. HTTP tests require local TCP sockets.
 
 Keep **both README languages updated together**, as required by `AGENTS.md`.
 Never commit passwords, webhook URLs, SSH keys, databases or logs. `.gitignore`

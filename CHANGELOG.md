@@ -1,5 +1,13 @@
 # Zmiany
 
+## 5.2
+
+- Statystyki loginów, haseł i kombinacji z zachowanych formularzy.
+- Heurystyczne grupowanie podobnych prób logowania i ścieżek z różnych IP.
+- Dzienny raport Discord za poprzedni dzień, bez loginów i haseł.
+- Usuwanie wybranych lub wszystkich formularzy przez chronione POST z tokenem i potwierdzeniem.
+- Dokumentacja polska i angielska oraz 33 testy.
+
 ## 5.1
 
 - Zapisywanie loginów i haseł z formularza pułapki routera.

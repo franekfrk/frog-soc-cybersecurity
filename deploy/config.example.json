@@ -49,5 +49,15 @@
     "interval_seconds": 3600,
     "backup_hours": 24,
     "backup_keep": 7
+  },
+  "daily_report": {
+    "enabled": true,
+    "hour": 20,
+    "minute": 0
+  },
+  "campaigns": {
+    "window_hours": 24,
+    "min_ips": 2,
+    "min_attempts": 3
   }
 }

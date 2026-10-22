@@ -7,7 +7,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 cat > "$STAGE/app.py" <<'PY'
 #!/usr/bin/env python3
-"""Frog SOC 5.1; stdlib-only Alpine/OpenRC mini SOC."""
+"""Frog SOC 5.2; stdlib-only Alpine/OpenRC mini SOC."""
 import base64
 import collections
 import copy
@@ -17,6 +17,7 @@ import logging
 import datetime
 import html
 import hashlib
+import hmac
 import http.server
 import ipaddress
 import json
@@ -35,7 +36,7 @@ import threading
 import time
 from urllib.parse import urlsplit, parse_qs, urlencode
 
-VERSION = '5.1'
+VERSION = '5.2'
 DEFAULT_CONFIG = {
     'capture_credentials': True, 'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
     'endlessh_logs': ['/var/log/endlessh.log*'],
@@ -49,7 +50,9 @@ DEFAULT_CONFIG = {
                'endlessh_record_seconds': 300, 'recovery': True},
     'retention': {'http_days': 90, 'http_rows': 30000, 'endlessh_days': 90,
                   'endlessh_rows': 100000, 'auth_days': 30, 'credentials_days': 7, 'credentials_rows': 10000},
-    'maintenance': {'interval_seconds': 3600, 'backup_hours': 24, 'backup_keep': 7}
+    'maintenance': {'interval_seconds': 3600, 'backup_hours': 24, 'backup_keep': 7},
+    'daily_report': {'enabled': True, 'hour': 20, 'minute': 0},
+    'campaigns': {'window_hours': 24, 'min_ips': 2, 'min_attempts': 3}
 }
 ROOT = os.environ.get('FROG_ROOT', '/opt/frog-soc')
 CONFIG_PATH = os.environ.get('FROG_CONFIG', ROOT + '/config.json')
@@ -88,6 +91,11 @@ def load_config(path):
         for key, value in config[group].items():
             if type(value) is int and value < 1:
                 raise ValueError(group+'.'+key+': wymagana dodatnia wartość')
+    if not 0 <= config['daily_report']['hour'] <= 23 or not 0 <= config['daily_report']['minute'] <= 59:
+        raise ValueError('daily_report: nieprawidłowa godzina/minuta')
+    for key,value in config['campaigns'].items():
+        if value < (2 if key == 'min_ips' else 1):
+            raise ValueError('campaigns.'+key+': zbyt mała wartość')
     for key in ('ram_percent', 'disk_percent'):
         if config['alerts'][key] > 100:
             raise ValueError(key+': maksimum 100')
@@ -122,6 +130,8 @@ ENDLESSH_SUCCESS = 0
 ENDLESSH_LOGS = CONFIG['endlessh_logs']
 MAINTENANCE_ERROR = ''
 AUTH_ERROR = ''
+CSRF_KEY = secrets.token_bytes(32)
+REPORT_LOCK = threading.Lock()
 
 
 class SOCConnection(sqlite3.Connection):
@@ -211,7 +221,7 @@ def webhooks_notify(content):
         if not url.startswith('https://discord.com/api/webhooks/') and not url.startswith('https://discordapp.com/api/webhooks/'):
             return
         body = json.dumps({'content': content[:1800], 'allowed_mentions': {'parse': []}}).encode()
-        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/5.1'}, method='POST')
+        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/5.2'}, method='POST')
         with urllib.request.urlopen(req, timeout=6) as r:
             r.read(128)
         return True
@@ -245,7 +255,7 @@ def geo_lookup(ip):
                     old = c.execute('SELECT checked FROM geo WHERE ip=?',(safe_ip,)).fetchone()
                     if old and time.time()-old[0] < GEO_REFRESH: return
             # Third party geo service receives the public attacker IP; not credentials.
-            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/5.1'})
+            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/5.2'})
             with urllib.request.urlopen(req,timeout=3) as r:
                 data = json.load(r)
             if not data.get('success'): return
@@ -691,7 +701,7 @@ def layout(title, content):
     return ("<!doctype html><html lang='pl'><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<script defer src='/assets/live.js'></script>"
-        "<title>Frog SOC 5.1 — " + esc(title) + "</title><style>"
+        "<title>Frog SOC 5.2 — " + esc(title) + "</title><style>"
         ":root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#020d11;color:#c8ffe0;"
         "font:15px system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:20px}"
         "h1{font-size:27px;margin:12px 0}h2{font-size:17px;margin:0 0 14px}"
@@ -703,9 +713,9 @@ def layout(title, content):
         "td,th{padding:9px;border-bottom:1px solid #28403b;text-align:left;word-break:break-word}"
         "progress{width:100%;height:12px;accent-color:#80f7bc}code{color:#b9fad2}"
         "input,select,button{font:inherit;padding:9px;border-radius:6px;max-width:100%;background:#102c30;color:#dcffe9;border:1px solid #39665b}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}label{display:grid;gap:5px}nav{display:flex;flex-wrap:wrap;gap:8px}svg{max-width:100%}@media(max-width:600px){main{padding:10px}td,th{padding:7px}h1{font-size:22px}.grid{grid-template-columns:1fr}}"
-        "</style><main><nav><b>🐸 FROG SOC 5.1</b> &nbsp; "
+        "</style><main><nav><b>🐸 FROG SOC 5.2</b> &nbsp; "
         "<a href='/soc'>Centrum</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
-        "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
+        "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/credential-stats'>Statystyki logowania</a><a href='/campaigns'>Wzorce botów</a><a href='/reports'>Raport dzienny</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
         "</article><p class='muted' id='live-status'>Aktualizacja w tle · dostęp Tailscale/localhost + hasło</p>"
         "</main></html>")
 
@@ -794,7 +804,7 @@ def old_frog():
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = 'FrogSOC/5.1'
+    server_version = 'FrogSOC/5.2'
     def log_message(self, *args):
         pass
 
@@ -875,13 +885,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return False
         return True
 
+    def delete_submissions(self):
+        if self.command != 'POST':
+            self.send(405, 'Wymagane POST.', 'text/plain; charset=utf-8', {'Allow': 'POST'})
+            return
+        if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1 or self.headers.get_content_type() != 'application/x-www-form-urlencoded':
+            self.send(400, 'Nieprawidłowy formularz.', 'text/plain; charset=utf-8')
+            return
+        try:
+            length = int(self.headers.get('Content-Length', '-1'))
+            if not 0 <= length <= 16384:
+                raise ValueError('Za duży formularz')
+            old_timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(3)
+                body = self.rfile.read(length)
+            finally:
+                self.connection.settimeout(old_timeout)
+            if len(body) != length:
+                raise ValueError('Niekompletny formularz')
+            fields = parse_qs(body.decode('utf-8', 'strict'), keep_blank_values=True, max_num_fields=256)
+            count = delete_credentials(fields)
+        except PermissionError:
+            self.send(403, 'Formularz wygasł lub token jest niepoprawny. Odśwież stronę.', 'text/plain; charset=utf-8')
+            return
+        except (OSError, ValueError, UnicodeError):
+            self.send(400, 'Nieprawidłowe dane lub brak potwierdzenia USUN.', 'text/plain; charset=utf-8')
+            return
+        self.send(303, '', headers={'Location': '/credentials?deleted='+str(count)})
+
     def route(self):
         path = urlsplit(self.path).path
-        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/credentials', '/assets/live.js'):
+        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/credentials', '/credentials/delete', '/credential-stats', '/campaigns', '/reports', '/assets/live.js'):
             if not self.authorized():
                 return
             params = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
             try:
+                if path == '/credentials/delete':
+                    self.delete_submissions()
+                    return
+                if path in ('/credential-stats', '/campaigns', '/reports'):
+                    self.send(200, {'/credential-stats': credential_stats_page, '/campaigns': campaigns_page, '/reports': reports_page}[path]())
+                    return
                 if path == '/credentials':
                     self.send(200, credentials_page(params))
                     return
@@ -1183,7 +1228,7 @@ def dispatch_alerts(alerts, now=None):
     for key,message in current.items():
         active,sent=prior.get(key,(0,0))
         if not active or now-sent>=CONFIG['alerts']['cooldown_seconds']:
-            if webhooks_notify('🚨 **FROG SOC 5.1** | '+message):
+            if webhooks_notify('🚨 **FROG SOC 5.2** | '+message):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('INSERT OR REPLACE INTO alert_state VALUES (?,?,?)',(key,1,now))
@@ -1192,7 +1237,7 @@ def dispatch_alerts(alerts, now=None):
     for key,(active,sent) in prior.items():
         if active and key not in current:
             # Record notices are one-shot observations, not incidents requiring recovery.
-            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 5.1** | Ustąpił alert: '+key):
+            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 5.2** | Ustąpił alert: '+key):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('UPDATE alert_state SET active=0 WHERE key=?',(key,))
@@ -1310,6 +1355,7 @@ def credentials_connect():
     c = sqlite3.connect(CREDENTIALS_DB, timeout=3, factory=SOCConnection)
     os.chmod(CREDENTIALS_DB, 0o600)
     c.execute('PRAGMA secure_delete=ON')
+    c.create_function('norm_ip', 1, canonical_ip)
     c.execute('CREATE TABLE IF NOT EXISTS submissions (id INTEGER PRIMARY KEY, ts REAL, ip TEXT, username TEXT, password TEXT)')
     c.execute('CREATE INDEX IF NOT EXISTS submissions_ts ON submissions(ts)')
     return c
@@ -1341,12 +1387,192 @@ def credentials_page(params=None):
             total = c.execute('SELECT COUNT(*) FROM submissions').fetchone()[0]
             pages = max(1, (total+CONFIG['page_size']-1)//CONFIG['page_size'])
             page = min(page, pages)
-            rows = c.execute('SELECT ts,ip,username,password FROM submissions ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?', (CONFIG['page_size'],(page-1)*CONFIG['page_size'])).fetchall()
-    body = ''.join('<tr><td>'+stamp(ts)+'</td><td>'+ip_link(ip)+'</td><td><code>'+esc(username)+'</code></td><td><details><summary>Pokaż hasło</summary><code>'+esc(password)+'</code></details></td></tr>' for ts,ip,username,password in rows)
+            rows = c.execute('SELECT id,ts,ip,username,password FROM submissions ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?', (CONFIG['page_size'],(page-1)*CONFIG['page_size'])).fetchall()
+            max_id = c.execute('SELECT COALESCE(MAX(id),0) FROM submissions').fetchone()[0]
+    token = deletion_token(max_id)
+    body = ''.join('<tr><td><input type="checkbox" name="id" value="'+str(row_id)+'" aria-label="Zaznacz wpis '+str(row_id)+'"></td><td>'+stamp(ts)+'</td><td>'+ip_link(ip)+'</td><td><code>'+esc(username)+'</code></td><td><details><summary>Pokaż hasło</summary><code>'+esc(password)+'</code></details></td></tr>' for row_id,ts,ip,username,password in rows)
     nav = 'Strona '+str(page)+' / '+str(pages)
     if page>1: nav += ' <a href="/credentials?page='+str(page-1)+'">← Nowsze</a>'
     if page<pages: nav += ' <a href="/credentials?page='+str(page+1)+'">Starsze →</a>'
-    return layout('Formularze pułapki', '<section class="box"><p>Zbieranie: <b>'+('włączone' if CONFIG['capture_credentials'] else 'wyłączone')+'</b> · wpisy: '+str(total)+'</p><p>Loginy i hasła z fałszywego panelu routera. Retencja: '+str(CONFIG['retention']['credentials_days'])+' dni, maks. '+str(CONFIG['retention']['credentials_rows'])+' wpisów. Osobna baza jest dostępna tylko właścicielowi; nie jest objęta automatycznymi backupami telemetrii.</p><table><tr><th>Czas</th><th>IP</th><th>Login</th><th>Hasło</th></tr>'+ (body or '<tr><td colspan="4">Brak formularzy</td></tr>')+'</table><p>'+nav+'</p></section>')
+    message = '<p class="ok">Usunięto wpisów: '+str(int(params['deleted']))+'</p>' if params.get('deleted', '').isdigit() else ''
+    return layout('Formularze pułapki', '<section class="box">'+message+'<p>Zbieranie: <b>'+('włączone' if CONFIG['capture_credentials'] else 'wyłączone')+'</b> · wpisy: '+str(total)+'</p><p>Loginy i hasła z fałszywego panelu routera. Retencja: '+str(CONFIG['retention']['credentials_days'])+' dni, maks. '+str(CONFIG['retention']['credentials_rows'])+' wpisów. Osobna baza jest dostępna tylko właścicielowi; nie jest objęta automatycznymi backupami telemetrii.</p><form method="post" action="/credentials/delete"><input type="hidden" name="token" value="'+esc(token)+'"><table><tr><th>Wybór</th><th>Czas</th><th>IP</th><th>Login</th><th>Hasło</th></tr>'+ (body or '<tr><td colspan="5">Brak formularzy</td></tr>')+'</table><label>Potwierdź usunięcie: wpisz USUN<input name="confirm" autocomplete="off"></label><button name="action" value="selected">Usuń zaznaczone</button><button name="action" value="all">Usuń całą historię z chwili otwarcia formularza</button></form><p>Nowe wpisy przechwycone po otwarciu formularza nie zostaną usunięte. Token ważny 30 minut.</p><p>'+nav+'</p></section>')
+
+
+def deletion_token(max_id, now=None):
+    payload = {'scope': 'credentials-delete', 'max_id': int(max_id), 'issued': time.time() if now is None else now}
+    encoded = base64.urlsafe_b64encode(json.dumps(payload,separators=(',',':')).encode()).decode()
+    signature = hmac.new(CSRF_KEY, encoded.encode(), hashlib.sha256).hexdigest()
+    return encoded+'.'+signature
+
+
+def validate_deletion_token(token, now=None):
+    now = time.time() if now is None else now
+    try:
+        encoded, signature = token.split('.')
+        expected = hmac.new(CSRF_KEY,encoded.encode(),hashlib.sha256).hexdigest()
+        if not secrets.compare_digest(signature,expected):
+            raise ValueError('signature')
+        payload = json.loads(base64.urlsafe_b64decode(encoded))
+        if payload['scope'] != 'credentials-delete' or type(payload['max_id']) is not int or payload['max_id']<0:
+            raise ValueError('scope')
+        issued = float(payload['issued'])
+        if not math.isfinite(issued) or not -30 <= now-issued <= 1800:
+            raise ValueError('expired')
+        return payload['max_id'], issued
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        raise PermissionError('Niepoprawny token') from None
+
+
+def delete_credentials(fields):
+    def one(name):
+        values = fields.get(name, [])
+        if len(values)!=1:
+            raise ValueError(name)
+        return values[0]
+    max_id, issued = validate_deletion_token(one('token'))
+    if one('confirm') != 'USUN':
+        raise ValueError('confirm')
+    action = one('action')
+    if action not in ('selected','all'):
+        raise ValueError('action')
+    ids = fields.get('id', [])
+    if action=='selected':
+        if not ids or len(ids)>200:
+            raise ValueError('ids')
+        ids = [int(value) for value in ids]
+        if any(value<1 for value in ids):
+            raise ValueError('ids')
+    with DB_LOCK:
+        with credentials_connect() as c:
+            sql='DELETE FROM submissions WHERE id<=? AND ts<=?'
+            params=[max_id,issued]
+            if action=='selected':
+                sql+=' AND id IN ('+','.join('?' for _ in ids)+')'
+                params.extend(ids)
+            return c.execute(sql,params).rowcount
+
+
+def credential_statistics():
+    with DB_LOCK:
+        with credentials_connect() as c:
+            total, ips, users, passwords = c.execute('SELECT COUNT(*),COUNT(DISTINCT norm_ip(ip)),COUNT(DISTINCT username),COUNT(DISTINCT password) FROM submissions').fetchone()
+            usernames=c.execute('SELECT username,COUNT(*) FROM submissions GROUP BY username ORDER BY COUNT(*) DESC,username LIMIT 20').fetchall()
+            secrets_rows=c.execute('SELECT password,COUNT(*) FROM submissions GROUP BY password ORDER BY COUNT(*) DESC,password LIMIT 20').fetchall()
+            pairs=c.execute('SELECT username,password,COUNT(*),COUNT(DISTINCT norm_ip(ip)) FROM submissions GROUP BY username,password ORDER BY COUNT(*) DESC,username,password LIMIT 20').fetchall()
+    return {'total':total,'ips':ips,'users':users,'passwords':passwords,'usernames':usernames,'secrets':secrets_rows,'pairs':pairs}
+
+
+def credential_stats_page():
+    data=credential_statistics()
+    value=lambda text: esc(text) if text else '(pusty)'
+    users=''.join('<tr><td>'+value(user)+'</td><td>'+str(n)+'</td></tr>' for user,n in data['usernames'])
+    passwords=''.join('<tr><td><details><summary>Pokaż hasło</summary><code>'+value(password)+'</code></details></td><td>'+str(n)+'</td></tr>' for password,n in data['secrets'])
+    pairs=''.join('<tr><td>'+value(user)+'</td><td><details><summary>Pokaż hasło</summary><code>'+value(password)+'</code></details></td><td>'+str(n)+'</td><td>'+str(ips)+'</td></tr>' for user,password,n,ips in data['pairs'])
+    return layout('Statystyki prób logowania', '<section class="box"><p>Wpisy: '+str(data['total'])+' · IP: '+str(data['ips'])+' · różne loginy: '+str(data['users'])+' · różne hasła: '+str(data['passwords'])+'</p><p>Wyłącznie zachowane formularze honeypota, zgodnie z retencją. Hasła nie są wysyłane na Discord.</p></section><div class="grid"><section class="box"><h2>Popularne loginy · top 20</h2><table>'+users+'</table></section><section class="box"><h2>Popularne hasła · top 20</h2><table>'+passwords+'</table></section></div><section class="box"><h2>Powtarzające się kombinacje · top 20</h2><table><tr><th>Login</th><th>Hasło</th><th>Próby</th><th>IP</th></tr>'+pairs+'</table></section>')
+
+
+def path_family(path):
+    path=path.lower()
+    if re.search(r'/(?:wp-|wordpress)',path):
+        return 'WordPress'
+    if path.startswith('/cgi-bin/'):
+        return 'CGI / router'
+    if path in ('/login','/admin','/login/','/admin/'):
+        return 'Panel logowania'
+    return re.sub(r'(?<=/)\d+(?=/|$)', ':id', path)[:150]
+
+
+def campaign_patterns(now=None):
+    now=time.time() if now is None else now
+    config=CONFIG['campaigns']
+    cutoff=now-config['window_hours']*3600
+    with DB_LOCK:
+        with credentials_connect() as c:
+            pairs=c.execute('SELECT username,password,COUNT(*),COUNT(DISTINCT norm_ip(ip)),MIN(ts),MAX(ts) FROM submissions WHERE ts BETWEEN ? AND ? GROUP BY username,password HAVING COUNT(*)>=? AND COUNT(DISTINCT norm_ip(ip))>=? ORDER BY COUNT(*) DESC,username,password LIMIT 20',(cutoff,now,config['min_attempts'],config['min_ips'])).fetchall()
+            credentials=[]
+            for user,password,count,ips,first,last in pairs:
+                peers=c.execute('SELECT DISTINCT norm_ip(ip) FROM submissions WHERE username=? AND password=? AND ts BETWEEN ? AND ? ORDER BY 1 LIMIT 20',(user,password,cutoff,now)).fetchall()
+                credentials.append({'username':user,'password':password,'count':count,'ips':ips,'first':first,'last':last,'peers':[row[0] for row in peers]})
+        with db_connect() as c:
+            c.create_function('path_family',1,path_family)
+            c.create_function('norm_ip',1,canonical_ip)
+            groups=c.execute('SELECT path_family(path),COUNT(*),COUNT(DISTINCT norm_ip(ip)),MIN(ts),MAX(ts) FROM events WHERE ts BETWEEN ? AND ? GROUP BY path_family(path) HAVING COUNT(*)>=? AND COUNT(DISTINCT norm_ip(ip))>=? ORDER BY COUNT(*) DESC,path_family(path) LIMIT 20',(cutoff,now,config['min_attempts'],config['min_ips'])).fetchall()
+            paths=[]
+            for family,count,ips,first,last in groups:
+                peers=c.execute('SELECT DISTINCT norm_ip(ip) FROM events WHERE path_family(path)=? AND ts BETWEEN ? AND ? ORDER BY 1 LIMIT 20',(family,cutoff,now)).fetchall()
+                paths.append({'family':family,'count':count,'ips':ips,'first':first,'last':last,'peers':[row[0] for row in peers]})
+    return credentials,paths
+
+
+def campaigns_page():
+    credentials,paths=campaign_patterns()
+    peer_links=lambda row: ', '.join(ip_link(ip) for ip in row['peers'])+(' …' if row['ips']>20 else '')
+    crows=''.join('<tr><td>'+esc(row['username'] or '(pusty)')+'</td><td><details><summary>Pokaż hasło</summary><code>'+esc(row['password'] or '(pusty)')+'</code></details></td><td>'+str(row['count'])+'</td><td>'+str(row['ips'])+'</td><td>'+peer_links(row)+'</td><td>'+stamp(row['first'])+' — '+stamp(row['last'])+'</td></tr>' for row in credentials)
+    prows=''.join('<tr><td>'+esc(row['family'])+'</td><td>'+str(row['count'])+'</td><td>'+str(row['ips'])+'</td><td>'+peer_links(row)+'</td></tr>' for row in paths)
+    return layout('Podobne wzorce botów', '<section class="box"><p>Okno: '+str(CONFIG['campaigns']['window_hours'])+' h · minimum '+str(CONFIG['campaigns']['min_ips'])+' IP i '+str(CONFIG['campaigns']['min_attempts'])+' prób.</p><p>Grupowanie jest heurystyką: wspólne dane logowania lub podobna rodzina ścieżek nie dowodzą, że adresy należą do jednego sprawcy. Każda tabela pokazuje do 20 grup i 20 adresów na grupę.</p></section><section class="box"><h2>Te same kombinacje z różnych IP</h2><table><tr><th>Login</th><th>Hasło</th><th>Próby</th><th>IP</th><th>Adresy</th><th>Zakres</th></tr>'+ (crows or '<tr><td colspan="6">Brak pasujących grup</td></tr>')+'</table></section><section class="box"><h2>Podobne ścieżki z różnych IP</h2><table><tr><th>Rodzina</th><th>Próby</th><th>IP</th><th>Adresy</th></tr>'+ (prows or '<tr><td colspan="4">Brak pasujących grup</td></tr>')+'</table></section>')
+
+
+def daily_report_text(day):
+    start=datetime.datetime.combine(day,datetime.time.min).timestamp()
+    end=datetime.datetime.combine(day+datetime.timedelta(days=1),datetime.time.min).timestamp()
+    with DB_LOCK:
+        with db_connect() as c:
+            http=c.execute('SELECT COUNT(*) FROM events WHERE ts>=? AND ts<?',(start,end)).fetchone()[0]
+            sessions,longest=c.execute('SELECT COUNT(*),COALESCE(MAX(seconds),0) FROM endlessh_sessions WHERE started>=? AND started<?',(start,end)).fetchone()
+            auth=c.execute('SELECT COUNT(*) FROM auth_events WHERE ts>=? AND ts<?',(start,end)).fetchone()[0]
+            c.create_function('norm_ip',1,canonical_ip)
+            new_ips=c.execute('SELECT COUNT(*) FROM (SELECT norm_ip(ip),MIN(ts) AS first FROM (SELECT ip,ts FROM events UNION ALL SELECT ip,started FROM endlessh_sessions UNION ALL SELECT ip,ts FROM auth_events) GROUP BY norm_ip(ip) HAVING first>=? AND first<?)',(start,end)).fetchone()[0]
+            alerts=c.execute('SELECT COUNT(*) FROM alert_state WHERE active=1').fetchone()[0]
+        if os.path.exists(CREDENTIALS_DB):
+            with credentials_connect() as c:
+                forms=c.execute('SELECT COUNT(*) FROM submissions WHERE ts>=? AND ts<?',(start,end)).fetchone()[0]
+        else:
+            forms=0
+    # Only aggregate values leave the VPS; no submitted usernames or passwords.
+    return ('📊 **FROG SOC '+VERSION+' | '+day.isoformat()+'**\nHTTP: '+str(http)+'\nSesje Endlessh: '+str(sessions)+'\nNajdłuższa sesja rozpoczęta tego dnia: %.3f s' % longest+'\nNowe IP w zachowanej historii: '+str(new_ips)+'\nNieudane logowania SSH: '+str(auth)+'\nFormularze pułapki: '+str(forms)+'\nAktywne alerty teraz: '+str(alerts)+'\nOkres: poprzedni dzień kalendarzowy w strefie serwera; dane według retencji.')
+
+
+def maybe_send_daily_report(now=None):
+    now=time.time() if now is None else now
+    config=CONFIG['daily_report']
+    if not config['enabled']:
+        return False
+    local=datetime.datetime.fromtimestamp(now)
+    if (local.hour,local.minute)<(config['hour'],config['minute']):
+        return False
+    day=local.date()-datetime.timedelta(days=1)
+    with REPORT_LOCK:
+        with DB_LOCK:
+            with db_connect() as c:
+                last=meta_get(c,'daily_report_last','')
+        if last>=day.isoformat():
+            return False
+        if not webhooks_notify(daily_report_text(day)):
+            return False
+        with DB_LOCK:
+            with db_connect() as c:
+                meta_set(c,'daily_report_last',day.isoformat())
+                meta_set(c,'daily_report_sent',now)
+        return True
+
+
+def daily_report_worker():
+    while True:
+        try:
+            maybe_send_daily_report()
+        except Exception:
+            logging.exception('Raport dzienny')
+        time.sleep(60)
+
+
+def reports_page():
+    day=datetime.datetime.now().date()-datetime.timedelta(days=1)
+    with DB_LOCK:
+        with db_connect() as c:
+            last=meta_get(c,'daily_report_last','—')
+            sent=float(meta_get(c,'daily_report_sent','0'))
+    config=CONFIG['daily_report']
+    return layout('Raport dzienny Discord', '<section class="box"><p>Wysyłka: '+('włączona' if config['enabled'] else 'wyłączona')+' · godzina %02d:%02d' % (config['hour'],config['minute'])+' w strefie serwera. Wymaga skonfigurowanego .discord-webhook.</p><p>Ostatni wysłany dzień: '+esc(last)+' · wysłano: '+stamp(sent or None)+'</p><p>Po udanym wysłaniu stan jest zachowany w SQLite. Błąd dostarczenia powoduje ponowienie za około minutę. Po przestoju wysyłany jest tylko raport za ostatni zakończony dzień; bez nadrabiania całej zaległości.</p><h2>Podgląd za wczoraj</h2><pre>'+esc(daily_report_text(day))+'</pre><p>Raport zawiera tylko podsumowania liczbowe. Nie zawiera haseł ani loginów z pułapki.</p></section>')
 
 
 if __name__ == '__main__':
@@ -1360,6 +1586,7 @@ if __name__ == '__main__':
             threading.Thread(target=geo_worker, daemon=True).start()
         threading.Thread(target=maintenance_worker, daemon=True).start()
         threading.Thread(target=endlessh_worker, daemon=True).start()
+        threading.Thread(target=daily_report_worker, daemon=True).start()
         server.serve_forever(poll_interval=0.5)
 PY
 cat > "$STAGE/config.example.json" <<'CONFIG'
@@ -1414,6 +1641,16 @@ cat > "$STAGE/config.example.json" <<'CONFIG'
     "interval_seconds": 3600,
     "backup_hours": 24,
     "backup_keep": 7
+  },
+  "daily_report": {
+    "enabled": true,
+    "hour": 20,
+    "minute": 0
+  },
+  "campaigns": {
+    "window_hours": 24,
+    "min_ips": 2,
+    "min_attempts": 3
   }
 }
 CONFIG
@@ -1467,7 +1704,7 @@ rollback() {
 }
 rc-service frog-soc restart || rollback
 if ! python3 - <<'PY'
-import base64, contextlib, importlib.util, pathlib, secrets, sqlite3, time, urllib.request, urllib.error, urllib.parse
+import base64, contextlib, importlib.util, pathlib, re, secrets, sqlite3, time, urllib.request, urllib.error, urllib.parse
 spec=importlib.util.spec_from_file_location('verify','/opt/frog-soc/app.py')
 app=importlib.util.module_from_spec(spec);spec.loader.exec_module(app)
 password=pathlib.Path(app.PASSWORD_FILE).read_text().strip()
@@ -1475,7 +1712,7 @@ headers={'Authorization':'Basic '+base64.b64encode(('frog:'+password).encode()).
 base='http://127.0.0.1:'+str(app.PORT)
 for attempt in range(20):
     try:
-        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','5.1'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
+        for path,marker in [('/health','ok'),('/soc','Aktywność'),('/ssh','Port źródłowy'),('/ssh?sort=longest','Historia Endlessh'),('/ssh.csv','duration_seconds'),('/activity','Wspólna aktywność'),('/settings','5.2'),('/credential-stats','Statystyki prób'),('/campaigns','wzorce botów'),('/reports','Raport dzienny'),('/credentials','Formularze pułapki'),('/frog','XP'),('/assets/live.js','setInterval')]:
             request=urllib.request.Request(base+path,headers=headers)
             with urllib.request.urlopen(request,timeout=5) as response:
                 assert marker in response.read().decode(), path
@@ -1492,13 +1729,22 @@ for attempt in range(20):
                 with urllib.request.urlopen(urllib.request.Request(base+'/login',data=data),timeout=5) as response:
                     assert response.status==200
                 with contextlib.closing(sqlite3.connect(app.CREDENTIALS_DB)) as c:
-                    assert c.execute('SELECT COUNT(*) FROM submissions WHERE username=? AND password=?',(username,password)).fetchone()[0]==1
+                    row=c.execute('SELECT id FROM submissions WHERE username=? AND password=?',(username,password)).fetchone()
+                    assert row is not None
+                with urllib.request.urlopen(urllib.request.Request(base+'/credentials',headers=headers),timeout=5) as response:
+                    page=response.read().decode()
+                token=re.search('name="token" value="([^"]+)"',page).group(1)
+                deletion=urllib.parse.urlencode({'token':token,'confirm':'USUN','action':'selected','id':row[0]}).encode()
+                with urllib.request.urlopen(urllib.request.Request(base+'/credentials/delete',data=deletion,headers=headers),timeout=5) as response:
+                    assert response.status==200
+                with contextlib.closing(sqlite3.connect(app.CREDENTIALS_DB)) as c:
+                    assert c.execute('SELECT COUNT(*) FROM submissions WHERE username=?',(username,)).fetchone()[0]==0
             finally:
                 with contextlib.closing(sqlite3.connect(app.CREDENTIALS_DB)) as c:
                     c.execute('DELETE FROM submissions WHERE username=?',(username,))
                     c.commit()
             assert pathlib.Path(app.CREDENTIALS_DB).stat().st_mode & 0o777 == 0o600
-            print('Zapis formularza i uprawnienia bazy: OK (wpis testowy usunięty)')
+            print('Zapis formularza, usuwanie przez panel i uprawnienia bazy: OK (wpis testowy usunięty)')
         print('HTTP, filtry, CSV, aktywność, konfiguracja, XP i JS: OK')
         break
     except Exception:
@@ -1513,7 +1759,7 @@ rc-service frog-soc status || rollback
 if command -v logrotate >/dev/null 2>&1 && [ -f "$STAGE/frog-soc.logrotate" ]; then
     cp "$STAGE/frog-soc.logrotate" /etc/logrotate.d/frog-soc
 fi
-printf 'Frog SOC 5.1 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
+printf 'Frog SOC 5.2 uruchomiony. Panel /ssh, /activity, /settings\nBackup: %s\n' "$BACKUP"
 DEPLOY
 cat > "$STAGE/frog-soc.logrotate" <<'ROTATION'
 /var/log/endlessh.log /var/log/frog-soc.log {

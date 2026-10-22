@@ -1,4 +1,4 @@
-# 🐸 Frog SOC 5.1
+# 🐸 Frog SOC 5.2
 
 **Polski** · [English](README.en.md)
 
@@ -8,6 +8,45 @@ alerty Discord i cyberżaba zdobywająca XP. Python i biblioteka standardowa;
 bez pip, Node.js i Dockera.
 
 Frog obserwuje i alarmuje. Nie blokuje IP, nie zastępuje firewalla ani SIEM.
+
+## Co nowego w 5.2
+
+- **Statystyki prób logowania** (`/credential-stats`): liczba prób i różnych IP,
+  top 20 loginów, haseł i kombinacji, liczba adresów dla każdej kombinacji.
+  Dane pochodzą wyłącznie z zachowanych formularzy; widok wymaga autoryzacji.
+- **Podobne wzorce botów** (`/campaigns`): grupy tych samych kombinacji
+  login/hasło z różnych IP oraz podobnych ścieżek HTTP. Domyślne okno: 24 h,
+  minimum 2 IP i 3 próby. Rodziny ścieżek obejmują WordPress, CGI/router,
+  panele logowania i ścieżki z numerycznymi identyfikatorami.
+  To heurystyka podobieństwa, a nie dowód wspólnego sprawcy. Widok pokazuje
+  maksymalnie 20 grup i 20 adresów w każdej grupie.
+- **Dzienny raport Discord** (`/reports`): domyślnie o **20:00 w strefie serwera**,
+  za poprzedni zakończony dzień kalendarzowy. Zawiera liczby HTTP, sesji
+  Endlessh i błędów SSH, najdłuższą sesję rozpoczętą danego dnia, liczbę
+  nowych IP w zachowanej historii, liczbę formularzy oraz aktualnie aktywnych
+  alertów. Nie zawiera loginów ani haseł. Wymaga `.discord-webhook`.
+- **Usuwanie formularzy** (`/credentials`): zaznaczone wpisy albo cała historia
+  z chwili otwarcia formularza, na wszystkich stronach. Wpisz `USUN` i wybierz
+  odpowiedni przycisk. Żądanie wymaga autoryzacji i podpisanego tokenu ważnego
+  30 minut; GET nie usuwa danych. Nowe wpisy po otwarciu formularza pozostają.
+  Usunięcia nie można cofnąć. Po restarcie ponownie otwórz formularz.
+
+Nowe opcje konfiguracji (można dodać do istniejącego `config.json`):
+
+```json
+{
+  "daily_report": {"enabled": true, "hour": 20, "minute": 0},
+  "campaigns": {"window_hours": 24, "min_ips": 2, "min_attempts": 3}
+}
+```
+
+Raport sprawdzany jest co minutę. Dzień ostatniego udanego wysłania zapisuje
+się w SQLite, więc restart nie wysyła go ponownie. Błąd dostarczenia powoduje
+ponowienie; timeout po przyjęciu wiadomości przez Discord może spowodować duplikat.
+Po przestoju wysyłany jest tylko ostatni zakończony dzień, bez nadrabiania
+całej zaległości. `/reports` udostępnia podgląd i stan ostatniej wysyłki.
+Statystyki i wykrywanie wzorców uwzględniają retencję; usunięte formularze
+znikają też z tych podsumowań.
 
 ## Co nowego w 5.1
 
@@ -176,9 +215,9 @@ odbywa się aktualizatorem opisanym poniżej.
 Wymagane: `/opt/frog-soc/app.py`, `.soc-password` i usługa `frog-soc`.
 
 ```sh
-scp -r deploy UZYTKOWNIK@VPS:~/frog-update-v5
+scp -r deploy UZYTKOWNIK@VPS:~/frog-update-v52
 ssh UZYTKOWNIK@VPS
-sudo sh ~/frog-update-v5/deploy.sh
+sudo sh ~/frog-update-v52/deploy.sh
 ```
 
 Dla innego portu administracyjnego użyj `scp -P PORT` / `ssh -p PORT` albo
@@ -198,7 +237,7 @@ Można też użyć pojedynczego, generowanego skryptu:
 sudo sh update-frog-soc-4.sh
 ```
 
-Nazwa została zachowana dla zgodności; skrypt wdraża **5.1** i korzysta z tej
+Nazwa została zachowana dla zgodności; skrypt wdraża **5.2** i korzysta z tej
 samej procedury backupu i kontroli co `deploy/deploy.sh`.
 
 ## Dostęp i widoki
@@ -227,6 +266,9 @@ Następnie otwórz `http://127.0.0.1:8080/soc`.
 | `/ssh.csv` | CSV, te same filtry co historia |
 | `/ip?ip=ADRES` | Podsumowanie danego IP |
 | `/activity` | 200 najnowszych zdarzeń HTTP/Endlessh/SSH, opcjonalny filtr `ip` |
+| `/credential-stats` | Statystyki loginów, haseł i kombinacji |
+| `/campaigns` | Podobne wzorce prób z różnych IP |
+| `/reports` | Podgląd i stan raportu dziennego Discord |
 | `/credentials` | Loginy i hasła wpisane do fałszywego panelu routera |
 | `/settings` | Konfiguracja, stan odczytu logów, backupu i utrzymania |
 | `/stats` | Ostatnie HTTP i rankingi z bufora; licznik godzinowy z SQLite |
@@ -313,7 +355,7 @@ XP jest inicjalizowane z zachowanej historii podczas migracji, a potem
 liczone trwale. Danych usuniętych przed migracją nie da się odtworzyć.
 Geolokalizacja wysyła publiczne IP HTTP do `ipwho.is`, maksymalnie 12 prób/h;
 wynik jest orientacyjny i nie dowodzi lokalizacji osoby. Można ją wyłączyć
-przez `geo_enabled: false`. Formularze honeypota są zapisywane w osobnej bazie zgodnie z konfiguracją 5.1.
+przez `geo_enabled: false`. Formularze honeypota są zapisywane w osobnej bazie zgodnie z konfiguracją.
 
 ## Rozwój i testy
 
@@ -332,9 +374,10 @@ sh -n update-frog-soc-4.sh
 python3 -m unittest discover -s tests -v
 ```
 
-24 testy obejmują import i rotację logów, sesje IPv6, filtry/CSV,
+33 testy obejmują import i rotację logów, sesje IPv6, filtry/CSV,
 walidację konfiguracji, trwałość wyciszenia i XP, backup SQLite oraz
-prawdziwe żądania HTTP z autoryzacją. Test HTTP wymaga możliwości otwarcia
+prawdziwe żądania HTTP z autoryzacją, statystyki i wzorce prób, harmonogram
+raportów oraz usuwanie wpisów z tokenem i potwierdzeniem. Test HTTP wymaga możliwości otwarcia
 lokalnego gniazda TCP.
 
 Nie publikuj haseł, webhooka, kluczy SSH, bazy ani logów. `.gitignore`
