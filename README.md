@@ -13,9 +13,12 @@ Frog obserwuje i alarmuje. Nie blokuje IP, nie zastępuje firewalla ani SIEM.
 
 ## Publiczna instancja
 
-[Otwórz portal usług](http://frog03.mikr.us:31888/) — publiczna strona HTTP
-instancji projektu, z odnośnikami do profili urządzeń. Panel administracyjny
-pozostaje chroniony. Ten adres działa z internetu bez pośrednictwa Cloudflare.
+[Otwórz portal usług przez HTTPS](https://frog03-31888.wykr.es/) — publiczna
+strona instancji projektu, z odnośnikami do profili urządzeń.
+[Bezpośredni adres HTTP](http://frog03.mikr.us:31888/) pozostaje dostępny.
+Panel administracyjny nadal wymaga Tailscale/localhost i hasła.
+Adres HTTPS korzysta z proxy hostingu; udostępnienie linku nie gwarantuje
+indeksowania ani prób logowania przez boty.
 
 ## Co nowego w 6.5
 

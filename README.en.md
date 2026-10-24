@@ -13,9 +13,12 @@ Frog observes and alerts. It does not block IPs or replace a firewall or SIEM.
 
 ## Public instance
 
-[Open the services portal](http://frog03.mikr.us:31888/) — the project instance’s
-public HTTP page, linking to its device profiles. The administration dashboard
-remains protected. This address is reachable from the Internet without Cloudflare.
+[Open the services portal over HTTPS](https://frog03-31888.wykr.es/) — the public
+project instance, linking to its device profiles.
+[Direct HTTP access](http://frog03.mikr.us:31888/) remains available.
+The administration dashboard still requires Tailscale/localhost and a password.
+The HTTPS address uses the hosting provider's proxy; publishing the link does not
+guarantee indexing or automated login attempts.
 
 ## New in 6.5
 
