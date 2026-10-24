@@ -745,3 +745,17 @@ Nie publikuj haseł, webhooka, kluczy SSH, bazy ani logów. `.gitignore`
 wyklucza typowe pliki z danymi i sekretami.
 
 Dokumentacja upstream: [Endlessh](https://github.com/skeeto/endlessh).
+
+### Weryfikacja Google i Bing
+
+Publiczna strona obsługuje znaczniki własności z lokalnego pliku
+`/opt/frog-soc/site-verification.json`, np.:
+
+```json
+{"google-site-verification":"TOKEN_GOOGLE","msvalidate.01":"TOKEN_BING"}
+```
+
+Wstaw własne tokeny z Google Search Console i Bing Webmaster Tools. Plik pozostaje
+na serwerze podczas aktualizacji. Aplikacja dopuszcza tylko te dwa znaczniki i tokeny
+złożone z liter, cyfr, `_` i `-` (do 256 znaków); nie wstawia dowolnego HTML.
+Weryfikacja własności i zgłoszenie adresu nie gwarantują indeksacji ani ruchu botów.

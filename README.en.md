@@ -743,3 +743,18 @@ Never commit passwords, webhook URLs, SSH keys, databases or logs. `.gitignore`
 excludes common data and secret files.
 
 Upstream documentation: [Endlessh](https://github.com/skeeto/endlessh).
+
+### Google and Bing verification
+
+The public page supports ownership tags from the local file
+`/opt/frog-soc/site-verification.json`, for example:
+
+```json
+{"google-site-verification":"GOOGLE_TOKEN","msvalidate.01":"BING_TOKEN"}
+```
+
+Use your own tokens from Google Search Console and Bing Webmaster Tools. Updates
+preserve this server-local file. The application accepts only these two tag names
+and tokens containing letters, digits, `_` and `-` (up to 256 characters); it does
+not insert arbitrary HTML. Verification and URL submission do not guarantee
+indexing or bot traffic.

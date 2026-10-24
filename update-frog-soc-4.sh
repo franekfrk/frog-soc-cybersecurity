@@ -1813,9 +1813,24 @@ def trap_profile(path):
     return match[1] if match and match[1] in CONFIG['honeypots']['enabled'] else None
 
 
+def site_verification_meta():
+    """Render only allowlisted public ownership tokens, never arbitrary HTML."""
+    try:
+        with open(os.path.join(ROOT, 'site-verification.json'), encoding='utf-8') as f:
+            values = json.loads(f.read(4097))
+        if not isinstance(values, dict):
+            return ''
+        return ''.join('<meta name="'+name+'" content="'+token+'">'
+                       for name in ('google-site-verification', 'msvalidate.01')
+                       if isinstance((token := values.get(name)), str)
+                       and re.fullmatch(r'[A-Za-z0-9_-]{1,256}', token))
+    except (OSError, ValueError):
+        return ''
+
+
 def trap_shell(title, content, profile=None):
     theme = TRAP_THEMES.get(profile, '')
-    return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>body{margin:0;background:#eef2f6;color:#203447;font:16px system-ui}header{background:#203447;color:white;padding:24px}main{max-width:1000px;margin:40px auto;padding:16px}section{background:white;padding:25px;border-radius:10px;border:1px solid #d2dce6}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}a{color:#2261a0}label{display:block;margin:16px 0}input,button{padding:12px;font:inherit;box-sizing:border-box;max-width:100%;border:1px solid #bac8d4;border-radius:5px}input{width:100%}button{background:#2261a0;color:white}form{max-width:400px}small{color:#66798c}'+theme+'</style><header><b>'+esc(title)+'</b></header><main>'+content+'</main></html>'
+    return '<!doctype html><html lang="en"><head>'+site_verification_meta()+'<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>body{margin:0;background:#eef2f6;color:#203447;font:16px system-ui}header{background:#203447;color:white;padding:24px}main{max-width:1000px;margin:40px auto;padding:16px}section{background:white;padding:25px;border-radius:10px;border:1px solid #d2dce6}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}a{color:#2261a0}label{display:block;margin:16px 0}input,button{padding:12px;font:inherit;box-sizing:border-box;max-width:100%;border:1px solid #bac8d4;border-radius:5px}input{width:100%}button{background:#2261a0;color:white}form{max-width:400px}small{color:#66798c}'+theme+'</style></head><body><header><b>'+esc(title)+'</b></header><main>'+content+'</main></body></html>'
 
 
 def public_host(raw):
