@@ -28,7 +28,7 @@ class ExpansionTests(unittest.TestCase):
         with urllib.request.urlopen(urllib.request.Request(self.base+'/rules/save',data=data,headers=self.auth)) as response:
             return response.read().decode()
 
-    def test_hub_six_profiles_and_capture_origin(self):
+    def test_hub_profiles_and_capture_origin(self):
         hub=self.get('/')
         for profile in self.app.CONFIG['honeypots']['enabled']:
             self.assertIn(self.app.TRAP_PATHS[profile],hub)
@@ -65,7 +65,7 @@ class ExpansionTests(unittest.TestCase):
     def test_disabled_profile_and_single_homepage(self):
         self.app.CONFIG['honeypots']['enabled']=['nas']
         self.app.CONFIG['honeypots']['homepage']='nas'
-        self.assertIn('Storage Station',self.get('/'))
+        self.assertIn('Nextcloud',self.get('/'))
         with self.assertRaises(urllib.error.HTTPError) as error:self.get('/traps/camera')
         self.assertEqual(error.exception.code,404);error.exception.close()
         self.assertNotIn('camera',self.app.trap_hub())
@@ -109,7 +109,7 @@ class ExpansionTests(unittest.TestCase):
                 self.assertEqual(response.read(),b'')
                 self.assertGreater(int(response.headers['Content-Length']),0)
                 self.assertEqual(response.headers['Server'],'WebServer')
-        for method,expected in [('OPTIONS',501),('PUT',501)]:
+        for method,expected in [('OPTIONS',501),('PUT',405)]:
             with self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(urllib.request.Request(self.base+'/',method=method))
             with error.exception as response:

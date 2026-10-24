@@ -1,13 +1,13 @@
-# 🐸 Frog SOC 6.3
+# 🐸 Frog SOC 6.5
 
 [Polski](README.md) · **English**
 
-A lightweight cybersecurity lab dashboard for **Linux with Python 3**: VPS
-monitoring, an HTTP honeypot, connection history from the separate **Endlessh**
-SSH tarpit, a shared event timeline, Discord alerts and a frog that earns XP.
-Python standard library only; no pip, Node.js or Docker required. The supplied
-automatic installation/update scripts currently target Alpine/OpenRC, while
-the application itself can also run on other Linux distributions.
+A lightweight **Linux/Python 3** cyberlab dashboard: VPS monitoring, HTTP traps,
+optional **SSH Capture** for login attempts, preserved **Endlessh** history, a shared
+timeline, Discord alerts and an XP-earning cyber frog. The dashboard uses Python's
+standard library; the optional SSH service requires `py3-paramiko`. No server-side
+pip, Node.js or Docker. Install/update scripts target Alpine/OpenRC; the dashboard
+itself also runs on other Linux distributions.
 
 Frog observes and alerts. It does not block IPs or replace a firewall or SIEM.
 
@@ -16,6 +16,143 @@ Frog observes and alerts. It does not block IPs or replace a firewall or SIEM.
 [Open the services portal](http://frog03.mikr.us:31888/) — the project instance’s
 public HTTP page, linking to its device profiles. The administration dashboard
 remains protected. This address is reachable from the Internet without Cloudflare.
+
+## New in 6.5
+
+The service creates `/var/log/frog-ssh.log` owned by `frogssh` with mode 600 before dropping privileges; `start_pre` checks permissions on each start.
+
+### Optional SSH Capture replacement
+
+`sudo env FROG_ENABLE_SSH_CAPTURE=1 sh update-frog-soc-4.sh` replaces Endlessh
+on the **same port** (`endlessh_port`, default 41888), preserving administrative
+SSH and Gatus. The updater uses Alpine `py3-paramiko`, creates a separate
+`frogssh` user without a login shell, preserves historical Endlessh logs and
+backs up the application. Failed verification rolls back the app and SSH service.
+A normal update without this variable does not switch an existing Endlessh.
+
+This is an authentication-only custom honeypot using SSH and an OpenSSH-style
+banner, not OpenSSH or Cowrie. Every password is rejected; publickey and none
+cannot log in. Shell, exec, PTY, SFTP and TCP/X11/agent forwarding are explicitly
+rejected. Limits: four concurrent sessions, 30 seconds/session, six attempts per
+session; dedicated OS account and host key. These controls do not guarantee the
+absence of all library or operating system vulnerabilities.
+
+Password and keyboard-interactive attempts go into a private SQLite spool at
+`/var/lib/frog-ssh/attempts.sqlite3` (directory 700, files 600), limited to 1000
+rows; maintenance every minute removes rows older than one hour. Frog imports every
+`import_interval` into the credentials database under profile `ssh`, deduplicates
+retries with persistent acknowledgements, including after dashboard deletion.
+The source is read-only to the dashboard; its buffered copy expires within one
+hour plus a minute of writing, even when deleted earlier from the dashboard. HTTP retention and dashboard deletion
+apply. Credentials remain excluded from telemetry backups. `capture_credentials:
+false` disables import; stop `frog-ssh` to stop
+capture itself.
+
+Bounded password-free `sessions.log` and `.1` (about 1 MiB each) use the existing
+Endlessh import format. Both log sources stay in `endlessh_logs`, preserving old
+history. `ssh_capture.enabled` selects the backend; `spool` specifies its private
+buffer. Health checks verify listening and readable logs, not protocol negotiation.
+Deployment verification negotiates SSH, checks rejection and credential import,
+then removes synthetic credentials. Clients see this service's host key; verify
+its fingerprint on the server before resolving any host-key warning.
+
+### HTTP authentication and service responses
+
+HTML forms still work. JSON accepts an object or fields nested under `params`,
+`User` or `SessionLogin`, with aliases `userName`, `UserName`, `account`,
+`Password` and `passWord`. New paths: `/RPC2`, `/ISAPI/Security/sessionLogin`,
+`/rest/login`, `/api/auth`. JSON login returns 401 without reflecting passwords.
+This is limited emulation without Digest, vendor encryption or RPC execution.
+
+WordPress `/xmlrpc.php` recognizes single `wp.getUsersBlogs`,
+`blogger.getUsersBlogs`, `wp.getProfile`, `wp.getUsers`, `wp.getOptions` and
+`metaWeblog.getRecentPosts` calls, records credentials and always returns a fault.
+It never executes methods. Multicall, DTD/entities and compound parameters are
+rejected. The 4096-byte/16-field limits remain: malformed data 400, unsupported
+media 415, oversized body 413. XML-RPC GET returns 405.
+
+Selected console paths redirect 302 to login. Public login responses set short-lived
+fictional HttpOnly/SameSite=Lax cookies without granting access, and use local CSS
+under service-style paths. SOC authentication remains separate. `/` remains the
+hub; selecting `honeypots.homepage` does not disable other profiles' paths.
+
+Grouped Docker/phpMyAdmin/configuration and SSH Capture alerts count public IPs
+only, excluding localhost, Tailscale and private networks; their events stay in
+history. Alerts contain no usernames or passwords. A public IP alone does not
+prove maliciousness and may still represent your own public-network tests.
+
+Protocol reference: [Paramiko ServerInterface](https://docs.paramiko.org/en/latest/api/server.html).
+
+### Full capture test and cleanup
+
+From the downloaded repository directory on the server, run:
+
+```bash
+sudo python3 tools/verify_ssh_capture.py
+```
+
+The script generates a one-time username and random password. It **does not change
+any administrator password** or print passwords. It verifies the host key, real
+SSH negotiation, authentication denial, exact spool contents, import by the live
+worker and visibility in authenticated `/credentials`. It then removes only its
+own test username/password from both databases, even if the test fails, and checks
+the entry is absent from the page. Spool cleanup runs as its owner, avoiding
+root-owned SQLite journals in the service directory. Password-free import
+acknowledgements may remain for two hours to prevent an in-flight import from
+restoring deleted data. The local session's IP/time remain in SSH history.
+No service is stopped and other submissions are preserved. Success ends with
+`PASS: live SSH capture and cleanup verified`. Cleanup failures are explicitly
+reported and produce a failing exit status. Requires running SSH Capture, enabled
+credential collection and sudo. The test connects locally to the configured port.
+
+## New in 6.4
+
+![Panel previews 6.4](docs/panels-6.4.png)
+
+New **phpMyAdmin** profile (`/phpmyadmin`, `/phpmyadmin/index.php`, `/pma`,
+`/phpMyAdmin`) captures `pma_username` / `pma_password`. Add `phpmyadmin` to
+`honeypots.enabled`. `honeypots.docker_api` (default `true`) enables fictional
+API responses at `/_ping`, `/version`, `/info`, `/containers/json`, `/images/json`,
+including `/v1.N/` prefixes. Mutation requests return 403; unknown container paths
+return 404. No Docker connection, command execution, image downloads or request
+body storage. Responses are fixed fixtures unrelated to the real VPS. This is a
+limited emulation, not a full Docker protocol implementation.
+
+New configuration lures: `/.env.production`, `/wp-config.php.bak`, `/config.php.bak`,
+`/docker-compose.yml`, `/.aws/credentials`. All contents are fixed in-memory data;
+none read system files. Passwords and identifiers are not used by real services.
+
+Classification distinguishes Docker API, phpMyAdmin and configuration access.
+Built-in grouped alerts count requests and distinct IPs over 15 minutes without
+form or request contents, using existing `alerts.enabled`, cooldown and Discord.
+
+Distinct responsive layouts are inspired by WebFig, Hikvision NVR, WordPress,
+Nextcloud and phpMyAdmin. All submitted forms still fail authentication. Views use
+original HTML/CSS without manufacturer assets or CDNs; they are not exact firmware
+replicas and may be recognized as honeypots. All use the existing HTTP port and
+install no additional services.
+
+To explicitly enable new traps during an upgrade:
+`sudo env FROG_ENABLE_NEW_TRAPS=1 sh update-frog-soc-4.sh`.
+Without this variable, the updater preserves the enabled profiles. Configuration
+is backed up before changing; existing password, notes and history remain.
+
+Selected response formats: [Docker Engine API](https://docs.docker.com/reference/api/engine/).
+
+## Updates, comparisons and IP notes
+
+Protected `/updates` shows HTTP requests and new IPs and paths since a shared
+checkpoint, defaulting to the last 24 hours. “Oznacz jako przeczytane” acknowledges
+through the page opening time; refreshing never advances the checkpoint. Lists
+are capped at 50 entries; novelty is relative to retained HTTP history.
+`/compare?period=24h` (also `7d`, `30d`) compares consecutive rolling periods:
+HTTP requests, distinct HTTP IPs, started Endlessh sessions and SSH failures,
+with absolute and percentage differences. Incomplete history and retention may
+reduce counts. `/ip?ip=ADDRESS` supports a shared label (80 characters) and note
+(2000 characters); empty fields remove the entry. IPv4-mapped IPv6 shares its note
+with canonical IPv4. Writes and acknowledgement require POST with a signed token
+valid for 30 minutes. Notes and checkpoint are in SQLite and automatic telemetry
+backups. These features use the existing HTTP port without extra dependencies.
 
 ## New in 6.3
 

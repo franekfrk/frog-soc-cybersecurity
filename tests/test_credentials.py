@@ -54,7 +54,7 @@ class CredentialTests(unittest.TestCase):
             self.assertEqual(c.execute('SELECT COUNT(*) FROM submissions').fetchone()[0],0)
 
     def test_body_limits_and_content_type(self):
-        for body,headers,expected in [(b'x'*4097,{'Content-Type':'application/x-www-form-urlencoded'},413),(b'{}',{'Content-Type':'application/json'},415),(b'&'.join([b'x=1']*17),{'Content-Type':'application/x-www-form-urlencoded'},400)]:
+        for body,headers,expected in [(b'x'*4097,{'Content-Type':'application/x-www-form-urlencoded'},413),(b'{}',{'Content-Type':'text/plain'},415),(b'&'.join([b'x=1']*17),{'Content-Type':'application/x-www-form-urlencoded'},400)]:
             with self.subTest(expected=expected),self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(urllib.request.Request(self.base+'/login',data=body,headers=headers))
             self.assertEqual(error.exception.code,expected);error.exception.close()

@@ -1,5 +1,25 @@
 # Zmiany
 
+## 6.5
+
+- Opcjonalna, nieuprzywilejowana pułapka SSH Capture zamiast Endlessh na tym samym porcie.
+- Zapis password/keyboard-interactive, odmowa wszystkich logowań i kanałów shell/exec/SFTP/forwarding.
+- Limity połączeń i prób, prywatny bufor z ograniczoną retencją, import z deduplikacją.
+- Zachowanie historii Endlessh i rollback usługi w aktualizatorze; poprawne uprawnienia logu OpenRC.
+- Logowania JSON, pola urządzeń i WordPress XML-RPC bez wykonywania metod; odrzucanie encji XML.
+- Przekierowania, fikcyjne cookies i lokalne ścieżki zasobów paneli.
+- Zbiorcze alerty pułapek pomijają lokalne i prywatne IP; hasła nie trafiają do Discorda.
+- Pełny test SSH z automatycznym usunięciem własnych danych z bufora i panelu.
+- README PL/EN z aktualną architekturą, instalacją, testowaniem i ograniczeniami.
+
+## 6.4
+
+- phpMyAdmin, fikcyjne API Docker i dodatkowe przynęty konfiguracji bez nowych portów.
+- Odrębne panele inspirowane WebFig, Hikvision NVR, WordPress, Nextcloud i phpMyAdmin.
+- Rozpoznawanie nowych ścieżek i zbiorcze alerty.
+- „Co nowego”, porównania okresów i wspólne etykiety/notatki IP w SQLite.
+- Podgląd paneli i testy HTTP, formularzy, ochrony dostępu oraz odmowy operacji Docker.
+
 ## 6.3
 
 - Profile MikroTik hEX, Hikvision NVR i Nextcloud z opisami sprzętu na stronie głównej.

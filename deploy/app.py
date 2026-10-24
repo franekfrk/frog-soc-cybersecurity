@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Frog SOC 6.3; stdlib-only Linux mini SOC."""
+"""Frog SOC 6.5; stdlib-only Linux mini SOC."""
 import base64
+import contextlib
 import collections
 import copy
 import csv
@@ -29,7 +30,7 @@ import time
 import zipfile
 from urllib.parse import urlsplit, parse_qs, urlencode
 
-VERSION = '6.3'
+VERSION = '6.5'
 DEFAULT_CONFIG = {
     'capture_credentials': True, 'listen_host': '0.0.0.0', 'http_port': 31888, 'endlessh_port': 41888,
     'endlessh_logs': ['/var/log/endlessh.log*'],
@@ -46,8 +47,9 @@ DEFAULT_CONFIG = {
     'maintenance': {'interval_seconds': 3600, 'backup_hours': 24, 'backup_keep': 7},
     'daily_report': {'enabled': True, 'hour': 20, 'minute': 0},
     'campaigns': {'window_hours': 24, 'min_ips': 2, 'min_attempts': 3},
-    'honeypots': {'enabled': ['router', 'camera', 'nas', 'admin', 'wordpress', 'api'], 'homepage': 'hub', 'ssh_public_port': 0},
+    'honeypots': {'enabled': ['router', 'camera', 'nas', 'admin', 'wordpress', 'api', 'phpmyadmin'], 'docker_api': True, 'homepage': 'hub', 'ssh_public_port': 0},
     'health_checks': {'gatus_url': 'http://127.0.0.1:21888/health', 'timeout_seconds': 2, 'interval_seconds': 30, 'endlessh_stale_seconds': 120},
+    'ssh_capture': {'enabled': False, 'spool': '/var/lib/frog-ssh/attempts.sqlite3'},
     'demo_enabled': True
 }
 ROOT = os.environ.get('FROG_ROOT', '/opt/frog-soc')
@@ -92,7 +94,7 @@ def load_config(path):
     for key,value in config['campaigns'].items():
         if value < (2 if key == 'min_ips' else 1):
             raise ValueError('campaigns.'+key+': zbyt mała wartość')
-    profiles={'router','camera','nas','admin','wordpress','api'}
+    profiles={'router','camera','nas','admin','wordpress','api','phpmyadmin'}
     if not all(isinstance(v,str) for v in config['honeypots']['enabled']) or not set(config['honeypots']['enabled']) <= profiles or not config['honeypots']['enabled'] or len(set(config['honeypots']['enabled']))!=len(config['honeypots']['enabled']):
         raise ValueError('Nieprawidłowe profile pułapek')
     if config['honeypots']['homepage'] not in ['hub']+config['honeypots']['enabled']:
@@ -175,6 +177,7 @@ def db_connect():
     c.execute('CREATE INDEX IF NOT EXISTS events_ip ON events(ip, ts)')
     c.execute('CREATE TABLE IF NOT EXISTS http_details (event_id INTEGER PRIMARY KEY, user_agent TEXT, profile TEXT, scan_label TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS watch_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, kind TEXT, path TEXT, window_seconds INTEGER, threshold INTEGER, enabled INTEGER)')
+    c.execute('CREATE TABLE IF NOT EXISTS ip_notes (ip TEXT PRIMARY KEY, label TEXT NOT NULL, note TEXT NOT NULL, updated REAL NOT NULL)')
     return c
 
 
@@ -235,7 +238,7 @@ def webhooks_notify(content):
         if not url.startswith('https://discord.com/api/webhooks/') and not url.startswith('https://discordapp.com/api/webhooks/'):
             return
         body = json.dumps({'content': content[:1800], 'allowed_mentions': {'parse': []}}).encode()
-        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.3'}, method='POST')
+        req = urllib.request.Request(url, body, {'Content-Type':'application/json','User-Agent':'FrogSOC/6.5'}, method='POST')
         with urllib.request.urlopen(req, timeout=6) as r:
             r.read(128)
         return True
@@ -269,7 +272,7 @@ def geo_lookup(ip):
                     old = c.execute('SELECT checked FROM geo WHERE ip=?',(safe_ip,)).fetchone()
                     if old and time.time()-old[0] < GEO_REFRESH: return
             # Third party geo service receives the public attacker IP; not credentials.
-            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.3'})
+            req = urllib.request.Request('https://ipwho.is/'+safe_ip, headers={'User-Agent':'FrogSOC/6.5'})
             with urllib.request.urlopen(req,timeout=3) as r:
                 data = json.load(r)
             if not data.get('success'): return
@@ -423,6 +426,7 @@ def endlessh_worker():
     while True:
         try:
             import_endlessh_logs()
+            ssh_capture_import()
         except Exception as exc:
             ENDLESSH_ERROR = 'Błąd importu Endlessh: '+str(exc)
         time.sleep(CONFIG['import_interval'])
@@ -593,7 +597,7 @@ def snapshot():
         'uptime': uptime(), 'load1': load1,
         'services': [
             {'name': 'Frog SOC', 'ok': PORT in ports, 'detail': 'HTTP :' + str(PORT)},
-            {'name': 'Endlessh', 'ok': ENDLESSH_PORT in ports,
+            {'name': 'SSH Capture' if CONFIG['ssh_capture']['enabled'] else 'Endlessh', 'ok': ENDLESSH_PORT in ports,
              'detail': 'Połączenia established na :'+str(ENDLESSH_PORT)+': ' + str(established[ENDLESSH_PORT])},
             {'name': 'Gatus', 'ok': 'gatus' in processes, 'detail': 'Wykrywanie procesu (nie health check)'},
             {'name': 'Tailscale', 'ok': 'tailscaled' in processes, 'detail': 'Wykrywanie procesu (nie status tunelu)'},
@@ -722,7 +726,7 @@ def layout(title, content):
     return ("<!doctype html><html lang='pl'><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<script defer src='/assets/live.js'></script><script defer src='/assets/features.js'></script>"
-        "<title>Frog SOC 6.3 — " + esc(title) + "</title><style>"
+        "<title>Frog SOC 6.5 — " + esc(title) + "</title><style>"
         ":root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#020d11;color:#c8ffe0;"
         "font:15px system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:20px}"
         "h1{font-size:27px;margin:12px 0}h2{font-size:17px;margin:0 0 14px}"
@@ -734,8 +738,8 @@ def layout(title, content):
         "td,th{padding:9px;border-bottom:1px solid #28403b;text-align:left;word-break:break-word}"
         "progress{width:100%;height:12px;accent-color:#80f7bc}code{color:#b9fad2}"
         "input,select,button{font:inherit;padding:9px;border-radius:6px;max-width:100%;background:#102c30;color:#dcffe9;border:1px solid #39665b}form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}label{display:grid;gap:5px}nav{display:flex;flex-wrap:wrap;gap:8px}svg{max-width:100%}@media(max-width:600px){main{padding:10px}td,th{padding:7px}h1{font-size:22px}.grid{grid-template-columns:1fr}}"
-        "</style><main><nav><b>🐸 FROG SOC 6.3</b> &nbsp; "
-        "<a href='/soc'>Centrum</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
+        "</style><main><nav><b>🐸 FROG SOC 6.5</b> &nbsp; "
+        "<a href='/soc'>Centrum</a><a href='/updates'>Co nowego</a><a href='/compare'>Porównania</a><a href='/stats'>Ataki</a><a href='/frog'>Żaba</a>"
         "<a href='/investigate'>Analiza</a><a href='/history'>Historia</a><a href='/geo'>Mapa IP</a><a href='/ssh'>SSH</a><a href='/activity'>Aktywność</a><a href='/credentials'>Formularze pułapki</a><a href='/credential-stats'>Statystyki logowania</a><a href='/campaigns'>Wzorce botów</a><a href='/reports'>Raport dzienny</a><a href='/rules'>Reguły</a><a href='/healthchecks'>Sprawność usług</a><a href='/demo'>Demo</a><a href='/settings'>Stan i konfiguracja</a><a href='/soc/json'>JSON</a></nav><article id='live-content'><h1>" + esc(title) + '</h1>' + content +
         "</article><p class='muted' id='live-status'>Aktualizacja w tle · dostęp Tailscale/localhost + hasło</p>"
         "</main></html>")
@@ -782,7 +786,7 @@ def center():
                        for x in s['services'])
     alarms = ''.join('<li>' + esc(x) + '</li>' for x in alerts) or '<li>Brak alertów progowych.</li>'
     return layout('Centrum dowodzenia',
-        traffic_chart() + "<section class='grid'>" + ''.join(blocks) + '</section>' +
+        "<section class='box'><a href='/updates'>Co nowego od ostatniej wizyty</a> · <a href='/compare'>Porównaj okresy ruchu</a></section>" + traffic_chart() + "<section class='grid'>" + ''.join(blocks) + '</section>' +
         "<div class='grid'><section class='box'><h2>🛡️ Usługi</h2><table>" + services + '</table></section>' +
         "<section class='box'><h2>🚨 Alerty</h2><ul>" + alarms + '</ul></section></div>' +
         "<section class='box'><h2>Porty nasłuchujące na VPS</h2><p><code>" +
@@ -877,6 +881,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.route()
 
+    def do_mutation(self):
+        path=urlsplit(self.path).path
+        result=docker_response(path,self.command) if CONFIG['honeypots']['docker_api'] else None
+        if result is None:
+            self.send(405,'Method not allowed.','text/plain; charset=utf-8',{'Allow':'GET, HEAD, POST'})
+            return
+        log_event(self.client_address[0],path,self.command,self.headers.get('User-Agent',''),'docker')
+        self.send(*result)
+
+    do_DELETE = do_mutation
+    do_PUT = do_mutation
+    do_PATCH = do_mutation
+
     def do_POST(self):
         self.route()
 
@@ -894,9 +911,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not 0 <= length <= 4096:
             self.send(413, 'Request too large.', 'text/plain; charset=utf-8')
             return False
-        if self.headers.get_content_type() != 'application/x-www-form-urlencoded':
-            self.send(415, 'Unsupported media type.', 'text/plain; charset=utf-8')
-            return False
         old_timeout = self.connection.gettimeout()
         try:
             self.connection.settimeout(3)
@@ -904,13 +918,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if len(body) != length:
                 self.send(400, 'Incomplete request.', 'text/plain; charset=utf-8')
                 return False
-            fields = parse_qs(body.decode('utf-8', 'replace'), keep_blank_values=True, max_num_fields=16)
-        except (OSError, ValueError):
+            credentials = capture_payload(body,self.headers.get_content_type(),profile,urlsplit(self.path).path)
+        except TypeError:
+            self.send(415, 'Unsupported media type.', 'text/plain; charset=utf-8')
+            return False
+        except (OSError, ValueError, UnicodeError, RecursionError):
             self.send(400, 'Invalid request.', 'text/plain; charset=utf-8')
             return False
         finally:
             self.connection.settimeout(old_timeout)
-        credentials = login_fields(fields, profile)
         if credentials is not None:
             try:
                 save_credentials(self.client_address[0], credentials[0], credentials[1], profile)
@@ -949,7 +965,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self.send(303, '', headers={'Location': '/credentials?deleted='+str(count)})
 
-    def save_rule(self):
+    def save_rule(self, note=False):
         if self.command!='POST':
             self.send(405,'Wymagane POST.','text/plain; charset=utf-8',{'Allow':'POST'})
             return
@@ -965,12 +981,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.connection.settimeout(old)
             if len(body)!=length: raise ValueError('Niekompletny formularz')
             fields=parse_qs(body.decode('utf-8','strict'),keep_blank_values=True,max_num_fields=32)
-            change_rule(fields)
+            change_note(fields) if note else change_rule(fields)
         except PermissionError:
             self.send(403,'Formularz wygasł. Odśwież stronę.','text/plain; charset=utf-8');return
         except (OSError,ValueError,UnicodeError) as exc:
-            self.send(400,layout('Nieprawidłowa reguła','<p>'+esc(exc)+'</p>'));return
-        self.send(303,'',headers={'Location':'/rules?saved=1'})
+            self.send(400,layout('Nieprawidłowy formularz','<p>'+esc(exc)+'</p>'));return
+        self.send(303,'',headers={'Location':('/updates' if fields.get('action',[''])[0]=='seen' else '/ip?'+urlencode({'ip':canonical_ip(fields.get('ip',[''])[0])})) if note else '/rules?saved=1'})
 
     def route(self):
         path = urlsplit(self.path).path
@@ -994,11 +1010,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send(200,demo_page())
             return
-        if path in ('/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/credentials', '/credentials/delete', '/credential-stats', '/campaigns', '/reports', '/rules', '/rules/save', '/healthchecks', '/geo/data', '/assets/live.js'):
+        if path in ('/updates', '/compare', '/notes/save', '/soc', '/stats', '/frog', '/soc/json', '/investigate', '/geo', '/history', '/ssh', '/ssh.csv', '/ip', '/activity', '/settings', '/credentials', '/credentials/delete', '/credential-stats', '/campaigns', '/reports', '/rules', '/rules/save', '/healthchecks', '/geo/data', '/assets/live.js'):
             if not self.authorized():
                 return
             params = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
             try:
+                if path == '/notes/save':
+                    self.save_rule(note=True)
+                    return
+                if path in ('/updates', '/compare'):
+                    self.send(200, updates_page() if path=='/updates' else comparison_page(params))
+                    return
                 if path == '/rules/save':
                     self.save_rule()
                     return
@@ -1047,7 +1069,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == '/health':
             self.send(200, 'ok', 'text/plain; charset=utf-8')
             return
+        docker = docker_response(path, self.command) if CONFIG['honeypots']['docker_api'] else None
+        if docker is not None:
+            log_event(self.client_address[0], path, self.command, self.headers.get('User-Agent',''), 'docker')
+            code, body, ctype = docker
+            self.send(code, body, ctype)
+            return
+        asset=device_asset(path)
+        if asset is not None:
+            log_event(self.client_address[0],path,self.command,self.headers.get('User-Agent',''))
+            self.send(200,asset,'text/css; charset=utf-8');return
         profile = None if path.startswith('/traps/') else trap_profile(path)
+        if path=='/xmlrpc.php' and 'wordpress' in CONFIG['honeypots']['enabled']: profile='wordpress'
         if self.command == 'POST' and profile:
             if not self.capture_form(profile):
                 return
@@ -1055,8 +1088,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/':
             self.send(200, trap_hub(self.headers.get('Host','')) if CONFIG['honeypots']['homepage']=='hub' else trap_page(CONFIG['honeypots']['homepage']))
         elif profile:
-            self.send(200, trap_page(profile, failed=self.command=='POST'))
-        elif path in ('/.env','/.git/config','/backup.zip','/config.json'):
+            headers=device_headers(profile)
+            if path=='/xmlrpc.php':
+                if self.command not in ('POST',):
+                    self.send(405,'XML-RPC server accepts POST requests only.','text/plain; charset=utf-8',{'Allow':'POST'})
+                else:
+                    self.send(200,'<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>403</int></value></member><member><name>faultString</name><value><string>Incorrect username or password.</string></value></member></struct></value></fault></methodResponse>','text/xml; charset=utf-8',headers)
+            elif self.command=='POST' and self.headers.get_content_type()=='application/json':
+                self.send(401,json.dumps({'error':{'code':401,'message':'Invalid username or password'}}),'application/json; charset=utf-8',headers)
+            elif self.command in ('GET','HEAD') and path in ('/wp-admin','/webfig','/phpmyadmin','/phpMyAdmin','/pma'):
+                headers['Location']=TRAP_LOGIN_PATHS[profile]
+                self.send(302,'',headers=headers)
+            else:
+                self.send(200, trap_page(profile, failed=self.command=='POST'),headers=headers)
+        elif path in DECOY_PATHS:
             content_type = 'application/zip' if path=='/backup.zip' else 'application/json; charset=utf-8' if path=='/config.json' else 'text/plain; charset=utf-8'
             self.send(200, decoy_file(path), content_type, {'Content-Disposition':'attachment; filename="backup.zip"'} if path=='/backup.zip' else None)
         else:
@@ -1210,7 +1255,7 @@ def ssh_page(page=1, params=None):
     ranking = ''.join('<tr><td>'+ip_link(ip)+'</td><td>'+str(n)+'</td><td>'+('%.3f s' % longest if longest is not None else '—')+'</td><td>%.3f s</td></tr>' % summed for ip,n,longest,summed in top)
     failures = ssh_failures()
     authrows = ''.join('<tr><td>'+ip_link(ip)+'</td><td>'+str(n)+'</td></tr>' for ip,n in failures['top_ips'])
-    return layout('🪤 SSH / Endlessh', '<section class="box"><h2>Historia Endlessh · port '+str(ENDLESSH_PORT)+'</h2><p>Nasłuch: '+('TAK' if ENDLESSH_PORT in ports else 'NIE')+' · aktywne TCP: '+str(established[ENDLESSH_PORT])+' · pasujące sesje: '+str(total)+'</p>'+filter_form(params)+status+'<p><a href="/ssh.csv?'+esc(urlencode({k:v for k,v in params.items() if k!='page'}))+'">Eksport CSV z filtrami</a></p><p class="muted">Czas w strefie serwera. Brak CLOSE: połączenie otwarte lub niekompletne logi. Retencja: '+str(CONFIG['retention']['endlessh_days'])+' dni / '+str(CONFIG['retention']['endlessh_rows'])+' sesji.</p><table><tr><th>IP</th><th>Port źródłowy</th><th>Początek</th><th>Koniec</th><th>Długość</th></tr>'+ (table or '<tr><td colspan="5">Brak danych</td></tr>')+'</table><p>'+nav+'</p></section><section class="box"><h2>Powracające IP · zachowana historia</h2><table><tr><th>IP</th><th>Sesje</th><th>Najdłuższa</th><th>Łącznie</th></tr>'+ranking+'</table></section><section class="box"><h2>Nieudane logowania sshd / Dropbear</h2><p>Osobna próbka logów: '+str(failures['count'])+'</p><table>'+authrows+'</table></section>')
+    return layout('🪤 SSH / '+('Capture' if CONFIG['ssh_capture']['enabled'] else 'Endlessh'), '<section class="box"><a href="/credentials">Loginy i hasła SSH: Formularze pułapki → profil ssh</a><p>Historia poniżej obejmuje również wcześniejsze sesje Endlessh.</p></section>'+ '<section class="box"><h2>Historia Endlessh · port '+str(ENDLESSH_PORT)+'</h2><p>Nasłuch: '+('TAK' if ENDLESSH_PORT in ports else 'NIE')+' · aktywne TCP: '+str(established[ENDLESSH_PORT])+' · pasujące sesje: '+str(total)+'</p>'+filter_form(params)+status+'<p><a href="/ssh.csv?'+esc(urlencode({k:v for k,v in params.items() if k!='page'}))+'">Eksport CSV z filtrami</a></p><p class="muted">Czas w strefie serwera. Brak CLOSE: połączenie otwarte lub niekompletne logi. Retencja: '+str(CONFIG['retention']['endlessh_days'])+' dni / '+str(CONFIG['retention']['endlessh_rows'])+' sesji.</p><table><tr><th>IP</th><th>Port źródłowy</th><th>Początek</th><th>Koniec</th><th>Długość</th></tr>'+ (table or '<tr><td colspan="5">Brak danych</td></tr>')+'</table><p>'+nav+'</p></section><section class="box"><h2>Powracające IP · zachowana historia</h2><table><tr><th>IP</th><th>Sesje</th><th>Najdłuższa</th><th>Łącznie</th></tr>'+ranking+'</table></section><section class="box"><h2>Nieudane logowania sshd / Dropbear</h2><p>Osobna próbka logów: '+str(failures['count'])+'</p><table>'+authrows+'</table></section>')
 
 
 def ip_page(ip):
@@ -1222,7 +1267,7 @@ def ip_page(ip):
             http = c.execute('SELECT COUNT(*),MIN(ts),MAX(ts) FROM events WHERE ip IN ('+placeholders+')',variants).fetchone()
             auth = c.execute('SELECT COUNT(*) FROM auth_events WHERE ip IN ('+placeholders+')',variants).fetchone()[0]
     count, first, last, seconds, longest = summary
-    return layout('Adres IP · '+canonical_ip(ip), bot_profile(ip)+ '<section class="box"><p>Sesje Endlessh: <b>'+str(count)+'</b> · HTTP: <b>'+str(http[0])+'</b> · błędy SSH: <b>'+str(auth)+'</b></p><p>Pierwsza sesja: '+stamp(first)+' · ostatnia: '+stamp(last)+'</p><p>Łączny czas zakończonych sesji: %.3f s · najdłuższa: %.3f s</p>' % (seconds or 0,longest or 0)+'<a href="/ssh?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wszystkie zachowane sesje tego IP</a> · <a href="/activity?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wspólna oś aktywności IP</a><p class="muted">Podsumowanie dotyczy danych dostępnych w okresie retencji.</p></section>')
+    return layout('Adres IP · '+canonical_ip(ip), note_form(ip)+bot_profile(ip)+ '<section class="box"><p>Sesje Endlessh: <b>'+str(count)+'</b> · HTTP: <b>'+str(http[0])+'</b> · błędy SSH: <b>'+str(auth)+'</b></p><p>Pierwsza sesja: '+stamp(first)+' · ostatnia: '+stamp(last)+'</p><p>Łączny czas zakończonych sesji: %.3f s · najdłuższa: %.3f s</p>' % (seconds or 0,longest or 0)+'<a href="/ssh?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wszystkie zachowane sesje tego IP</a> · <a href="/activity?'+esc(urlencode({'ip':canonical_ip(ip)}))+'">Wspólna oś aktywności IP</a><p class="muted">Podsumowanie dotyczy danych dostępnych w okresie retencji.</p></section>')
 
 
 def import_auth_logs():
@@ -1308,6 +1353,7 @@ def alert_candidates(s=None):
         result.append(('import:endlessh','Błąd odczytu logów Endlessh: '+ENDLESSH_ERROR))
     if MAINTENANCE_ERROR:
         result.append(('maintenance','Błąd utrzymania / backupu: '+MAINTENANCE_ERROR))
+    result.extend(trap_alerts(now))
     result.extend(rule_alerts(now))
     return result
 
@@ -1321,7 +1367,7 @@ def dispatch_alerts(alerts, now=None):
     for key,message in current.items():
         active,sent=prior.get(key,(0,0))
         if not active or now-sent>=CONFIG['alerts']['cooldown_seconds']:
-            if webhooks_notify('🚨 **FROG SOC 6.3** | '+message):
+            if webhooks_notify('🚨 **FROG SOC 6.5** | '+message):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('INSERT OR REPLACE INTO alert_state VALUES (?,?,?)',(key,1,now))
@@ -1330,7 +1376,7 @@ def dispatch_alerts(alerts, now=None):
     for key,(active,sent) in prior.items():
         if active and key not in current:
             # Record notices are one-shot observations, not incidents requiring recovery.
-            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.3** | Ustąpił alert: '+key):
+            if key=='endlessh:record' or not CONFIG['alerts']['recovery'] or webhooks_notify('✅ **FROG SOC 6.5** | Ustąpił alert: '+key):
                 with DB_LOCK:
                     with db_connect() as c:
                         c.execute('UPDATE alert_state SET active=0 WHERE key=?',(key,))
@@ -1409,7 +1455,7 @@ def live_script():
 const interval = INTERVAL;
 let busy = false;
 setInterval(async () => {
-  if (document.getElementById('world-map') || location.pathname==='/rules') return;
+  if (document.getElementById('world-map') || ['/rules','/updates'].includes(location.pathname)) return;
   if (busy || document.hidden || document.activeElement?.closest('form')) return;
   if (document.querySelector('form[data-dirty]')) return;
   busy = true;
@@ -1455,6 +1501,10 @@ def credentials_connect():
     c.execute('CREATE INDEX IF NOT EXISTS submissions_ts ON submissions(ts)')
     if 'profile' not in {row[1] for row in c.execute('PRAGMA table_info(submissions)')}:
         c.execute("ALTER TABLE submissions ADD COLUMN profile TEXT NOT NULL DEFAULT 'router'")
+    if 'source_id' not in {row[1] for row in c.execute('PRAGMA table_info(submissions)')}:
+        c.execute('ALTER TABLE submissions ADD COLUMN source_id TEXT')
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS submissions_source ON submissions(source_id)')
+    c.execute('CREATE TABLE IF NOT EXISTS imported_sources (id TEXT PRIMARY KEY,ts REAL)')
     return c
 
 
@@ -1492,7 +1542,7 @@ def credentials_page(params=None):
     if page>1: nav += ' <a href="/credentials?page='+str(page-1)+'">← Nowsze</a>'
     if page<pages: nav += ' <a href="/credentials?page='+str(page+1)+'">Starsze →</a>'
     message = '<p class="ok">Usunięto wpisów: '+str(int(params['deleted']))+'</p>' if params.get('deleted', '').isdigit() else ''
-    return layout('Formularze pułapki', '<section class="box">'+message+'<p>Zbieranie: <b>'+('włączone' if CONFIG['capture_credentials'] else 'wyłączone')+'</b> · wpisy: '+str(total)+'</p><p>Loginy i hasła z fałszywego panelu routera. Retencja: '+str(CONFIG['retention']['credentials_days'])+' dni, maks. '+str(CONFIG['retention']['credentials_rows'])+' wpisów. Osobna baza jest dostępna tylko właścicielowi; nie jest objęta automatycznymi backupami telemetrii.</p><form method="post" action="/credentials/delete"><input type="hidden" name="token" value="'+esc(token)+'"><table><tr><th>Wybór</th><th>Czas</th><th>IP</th><th>Pułapka</th><th>Login</th><th>Hasło</th></tr>'+ (body or '<tr><td colspan="6">Brak formularzy</td></tr>')+'</table><label>Potwierdź usunięcie: wpisz USUN<input name="confirm" autocomplete="off"></label><button name="action" value="selected">Usuń zaznaczone</button><button name="action" value="all">Usuń całą historię z chwili otwarcia formularza</button></form><p>Nowe wpisy przechwycone po otwarciu formularza nie zostaną usunięte. Token ważny 30 minut.</p><p>'+nav+'</p></section>')
+    return layout('Formularze pułapki', '<section class="box">'+message+'<p>Zbieranie: <b>'+('włączone' if CONFIG['capture_credentials'] else 'wyłączone')+'</b> · wpisy: '+str(total)+'</p><p>Loginy i hasła z pułapek HTTP oraz SSH. SSH ma profil ssh. Retencja: '+str(CONFIG['retention']['credentials_days'])+' dni, maks. '+str(CONFIG['retention']['credentials_rows'])+' wpisów. Osobna baza jest dostępna tylko właścicielowi; nie jest objęta automatycznymi backupami telemetrii.</p><form method="post" action="/credentials/delete"><input type="hidden" name="token" value="'+esc(token)+'"><table><tr><th>Wybór</th><th>Czas</th><th>IP</th><th>Pułapka</th><th>Login</th><th>Hasło</th></tr>'+ (body or '<tr><td colspan="6">Brak formularzy</td></tr>')+'</table><label>Potwierdź usunięcie: wpisz USUN<input name="confirm" autocomplete="off"></label><button name="action" value="selected">Usuń zaznaczone</button><button name="action" value="all">Usuń całą historię z chwili otwarcia formularza</button></form><p>Nowe wpisy przechwycone po otwarciu formularza nie zostaną usunięte. Token ważny 30 minut.</p><p>'+nav+'</p></section>')
 
 
 def deletion_token(max_id, now=None):
@@ -1673,6 +1723,7 @@ def reports_page():
 
 
 TRAP_PROFILES = {
+    'phpmyadmin': ('phpMyAdmin', 'MySQL database administration', '▤'),
     'router': ('Gateway Manager', 'Network gateway configuration', '🌐'),
     'camera': ('Network Video Recorder', 'Video surveillance management', '📹'),
     'nas': ('Storage Station', 'Files and shared volumes', '🗄️'),
@@ -1682,11 +1733,12 @@ TRAP_PROFILES = {
 }
 
 
-TRAP_PATHS = {'router':'/router','camera':'/camera','nas':'/storage','admin':'/console','wordpress':'/wp-admin','api':'/api'}
-TRAP_LOGIN_PATHS = {'router':'/webfig/','camera':'/doc/page/login.asp','nas':'/index.php/login','admin':'/console/login','wordpress':'/wp-login.php','api':'/api/login'}
+TRAP_PATHS = {'phpmyadmin':'/phpmyadmin','router':'/router','camera':'/camera','nas':'/storage','admin':'/console','wordpress':'/wp-admin','api':'/api'}
+TRAP_LOGIN_PATHS = {'phpmyadmin':'/phpmyadmin/index.php','router':'/webfig/','camera':'/doc/page/login.asp','nas':'/index.php/login','admin':'/console/login','wordpress':'/wp-login.php','api':'/api/login'}
 
 
 TRAP_DEVICES = {
+    'phpmyadmin': {'kind':'Database server','model':'Database administration','platform':'phpMyAdmin','node':'db-01'},
     'router': {'kind':'Network gateway', 'model':'MikroTik hEX · RB750Gr3', 'platform':'RouterOS · WebFig', 'node':'gateway-01'},
     'camera': {'kind':'Network video recorder', 'model':'Hikvision DS-7608NI-K2', 'platform':'NVR · 8 channels', 'node':'nvr-01'},
     'nas': {'kind':'File server', 'model':'Storage server', 'platform':'Nextcloud', 'node':'storage-01'},
@@ -1695,6 +1747,7 @@ TRAP_DEVICES = {
     'api': {'kind':'Application server', 'model':'Integration gateway', 'platform':'Developer API', 'node':'api-01'}
 }
 TRAP_THEMES = {
+    'phpmyadmin':'body{background:#fff;color:#444}',
     'router':'body{background:#eee;color:#292929}header{background:#333}section{border-radius:2px}button{background:#666}',
     'camera':'body{background:#20242b;color:#252b35}main>p>a{color:#d6e1ed}header{background:#292e37;border-bottom:4px solid #d83237}section{max-width:540px;margin:auto}button{background:#c92c32;border-color:#c92c32}',
     'nas':'body{background:#00679e;color:#263743}main>p>a{color:white}header{background:#005985}section{max-width:460px;margin:auto;border-radius:14px}button{background:#0082c9;border-color:#0082c9;width:100%}',
@@ -1705,11 +1758,14 @@ TRAP_THEMES = {
 
 
 TRAP_FORM_FIELDS = {
+    'phpmyadmin':('pma_username','pma_password'),
     'router':('username','password'), 'camera':('username','password'),
     'nas':('user','password'), 'admin':('username','password'),
     'wordpress':('log','pwd'), 'api':('email','password')
 }
 TRAP_ALIASES = {
+    '/RPC2':'camera', '/ISAPI/Security/sessionLogin':'camera', '/rest/login':'router', '/api/auth':'api',
+    '/phpMyAdmin':'phpmyadmin', '/pma':'phpmyadmin', '/pma/index.php':'phpmyadmin', '/phpMyAdmin/index.php':'phpmyadmin',
     '/webfig':'router', '/webfig/index.html':'router', '/router/login':'router',
     '/camera/login':'camera', '/doc/page/login.asp':'camera', '/storage/login':'nas', '/nextcloud/login':'nas',
     '/admin':'router', '/login':'router', '/login.php':'router', '/cgi-bin/luci':'router',
@@ -1723,8 +1779,8 @@ TRAP_ALIASES = {
 def login_fields(fields, profile):
     # Prefer the profile's own names, then legacy and common client conventions.
     preferred_user, preferred_password = TRAP_FORM_FIELDS[profile]
-    user_keys = tuple(dict.fromkeys((preferred_user,'username','user','login','log','email','luci_username')))
-    password_keys = tuple(dict.fromkeys((preferred_password,'password','pass','passwd','pwd','luci_password')))
+    user_keys = tuple(dict.fromkeys((preferred_user,'username','user','login','log','email','luci_username','pma_username','userName','UserName','User','account')))
+    password_keys = tuple(dict.fromkeys((preferred_password,'password','pass','passwd','pwd','luci_password','pma_password','Password','passwd','passWord')))
     if not any(key in fields for key in user_keys + password_keys):
         return None
     def first(keys):
@@ -1773,6 +1829,8 @@ def trap_hub(host=''):
                   '<p>'+esc(device['model'])+'</p><p><strong>'+esc(device['platform'])+'</strong></p>'
                   '<p><small>'+esc(device['kind'])+' · '+esc(device['node'])+'</small></p>'
                   '<a href="'+TRAP_PATHS[key]+'">Open console →</a></section>')
+    if CONFIG['honeypots']['docker_api']:
+        cards+='<section><h2>Container Engine</h2><p>Docker Engine API</p><p><small>Application runtime · engine-01</small></p><a href="/version">Engine version →</a> · <a href="/containers/json">Containers</a></section>'
     ssh_port=CONFIG['honeypots']['ssh_public_port'] or ENDLESSH_PORT
     cards+='<section><h2>🔑 SSH Access</h2><p>Remote access service</p><p>TCP port <strong>'+str(ssh_port)+'</strong></p><code>ssh -p '+str(ssh_port)+' '+esc(host)+'</code></section>'
     return trap_shell('Device Services Portal','<h1>Available services</h1><p>Select the device or service you want to manage.</p><div class="cards">'+cards+'</div><p><small>Configuration resources: <a href="/config.json">configuration</a> · <a href="/backup.zip">configuration backup</a></small></p>')
@@ -1781,24 +1839,51 @@ def trap_hub(host=''):
 def trap_page(profile, failed=False):
     title,subtitle,icon=TRAP_PROFILES[profile]
     device=TRAP_DEVICES[profile]
-    context={
-        'router':'Ethernet interfaces · IP addresses · Firewall · Routing',
-        'camera':'Live view · Playback · Recording settings · Channel management',
-        'nas':'Files · Shared folders · Calendar · User access',
-        'admin':'System status · Maintenance · Access control',
-        'wordpress':'Publishing dashboard · Themes · Site settings',
-        'api':'API keys · Integrations · Request usage'
-    }[profile]
-    username_field, password_field = TRAP_FORM_FIELDS[profile]
-    label = 'Email address' if profile=='api' else 'Username or email address' if profile=='wordpress' else 'Login' if profile=='router' else 'Username or email' if profile=='nas' else 'Username'
-    user_id = 'user_login' if profile=='wordpress' else 'login-user'
-    password_id = 'user_pass' if profile=='wordpress' else 'login-password'
-    form = ('<form id="loginform" name="loginform" method="post" action="'+TRAP_LOGIN_PATHS[profile]+'" enctype="application/x-www-form-urlencoded">'
-            '<label for="'+user_id+'">'+label+'</label><input type="text" id="'+user_id+'" name="'+username_field+'" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="256" required>'
-            '<label for="'+password_id+'">Password</label><input type="password" id="'+password_id+'" name="'+password_field+'" autocomplete="current-password" maxlength="512" required>'
-            '<p><button type="submit" name="'+('wp-submit' if profile=='wordpress' else 'submit')+'" value="Log In">Sign in</button></p></form>')
-    identity = '<h2>'+esc(device['model'])+'</h2><p><strong>'+esc(device['platform'])+'</strong> · '+esc(device['node'])+'</p>'
-    return trap_shell(title+' — '+device['platform'],'<p><a href="/">← All services</a></p><section><h1>'+icon+' '+esc(title)+'</h1>'+identity+'<p>'+esc(subtitle)+'</p><p><small>'+esc(context)+'</small></p>'+('<p role="alert">Sign-in failed. Check your credentials.</p>' if failed else '')+form+'</section>',profile)
+    user,password=TRAP_FORM_FIELDS[profile]
+    uid='user_login' if profile=='wordpress' else 'login-user'
+    pid='user_pass' if profile=='wordpress' else 'login-password'
+    label='Username or Email Address' if profile=='wordpress' else 'Username'
+    form=('<form id="loginform" name="loginform" method="post" action="'+TRAP_LOGIN_PATHS[profile]+'" enctype="application/x-www-form-urlencoded">'
+        +('<div class="error" role="alert">Sign-in failed. Check your credentials.</div>' if failed else '')
+        +'<label for="'+uid+'">'+label+'</label><input id="'+uid+'" name="'+user+'" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="256" required autofocus>'
+        +'<label for="'+pid+'">Password</label><input id="'+pid+'" name="'+password+'" type="password" autocomplete="current-password" maxlength="512" required>'
+        +('<p class="remember"><label><input type="checkbox" name="rememberme" value="forever"> Remember Me</label></p>' if profile=='wordpress' else '')
+        +'<button type="submit" name="'+('wp-submit' if profile=='wordpress' else 'submit')+'" value="Log In">'+('Log In' if profile=='wordpress' else 'Log in' if profile=='phpmyadmin' else 'Login')+'</button></form>')
+    meta='<div class="device-meta">'+esc(device['model'])+' · '+esc(device['platform'])+' · '+esc(device['node'])+'</div>'
+    languages='<label class="language">Language <select aria-label="Language"><option>English</option></select></label>'
+    if profile=='wordpress':
+        content='<div class="wp-symbol" aria-label="WordPress">W</div><section class="login-box">'+form+'</section><p class="below"><a href="/">← Go to site</a></p>'+languages+meta
+    elif profile=='router':
+        content='<div class="router-top"><strong>MikroTik</strong><span>RouterOS</span></div><div class="router-toolbar">WebFig <span>Quick Set &nbsp; · &nbsp; Interfaces &nbsp; · &nbsp; IP &nbsp; · &nbsp; System</span></div><div class="router-workspace"><aside><b>WebFig</b><p>Quick Set</p><p>Interfaces</p><p>Wireless</p><p>Bridge</p><p>IP</p><p>Routing</p><p>System</p><p>Tools</p></aside><section class="login-box"><h1>RouterOS WebFig</h1><p class="intro">Log in to manage your router</p>'+form+meta+'</section></div><p class="below">MikroTik RouterOS · WebFig configuration interface</p>'
+    elif profile=='camera':
+        content='<div class="nvr-top"><strong>HIKVISION</strong>'+languages+'</div><div class="nvr-layout"><div class="nvr-scene"><span class="scene-label">NETWORK VIDEO RECORDER</span><div class="channels"><div>CAM 01</div><div>CAM 02</div><div>CAM 03</div><div>CAM 04</div></div><h2>Video Management System</h2><p>Live view · Playback · Configuration</p></div><section class="login-box"><span class="eyebrow">DEVICE ACCESS</span><h1>User Login</h1><p class="intro">Enter your account information</p>'+form+meta+'</section></div><footer>Network Video Recorder · Web Client</footer>'
+    elif profile=='nas':
+        content='<div class="cloud-mark" aria-label="Nextcloud"><i></i><i></i><i></i></div><h1 class="cloud-title">Nextcloud</h1><section class="login-box"><h2>Log in to your account</h2>'+form+'</section>'+meta+'<p class="below">A safe home for all your data</p>'
+    elif profile=='phpmyadmin':
+        content='<div class="pma-wordmark">php<span>MyAdmin</span><small>MySQL administration</small></div><section class="login-box"><h1>Welcome to phpMyAdmin</h1>'+languages+'<h2>Log in</h2>'+form+'<p class="intro">Server: localhost</p>'+meta+'</section>'
+    elif profile=='admin':
+        content='<div class="console-brand">▦ <strong>Server Console</strong><span>Infrastructure Management</span></div><section class="login-box"><span class="eyebrow">MANAGEMENT NODE</span><h1>Sign in</h1><p class="intro">Use your administrator account to continue.</p>'+form+meta+'</section><p class="below">Authorized access only</p>'
+    else:
+        content='<div class="console-brand">⌘ <strong>Developer Platform</strong><span>API & Integrations</span></div><section class="login-box"><span class="eyebrow">DEVELOPER CONSOLE</span><h1>Welcome back</h1><p class="intro">Sign in to manage your integrations.</p>'+form+meta+'</section><p class="below">Gateway services · API management</p>'
+    css='''
+*{box-sizing:border-box}header{display:none}body{min-height:100vh;font:14px Arial,Helvetica,sans-serif}main{max-width:none;margin:0;padding:0}section.login-box{width:360px;max-width:calc(100vw - 40px);margin:0 auto;padding:30px;border-radius:4px;background:#fff;box-shadow:0 4px 24px #00000012}form{max-width:none;display:flow-root}h1{font-size:24px;font-weight:500;margin:0 0 12px}h2{font-size:18px;font-weight:400}label{font-size:13px;margin:18px 0 7px}input{padding:10px;border-radius:3px;font-size:17px;background:white;color:#333}input:focus{outline:2px solid #448aaa;outline-offset:1px}button{cursor:pointer;margin-top:22px;padding:10px 22px;font-size:14px;border-radius:3px}select{padding:7px;border:1px solid #c3c4c7;background:#fff;color:#444}a{color:inherit}.intro{color:#757b80;line-height:1.6}.device-meta{font-size:11px;color:#80868b;line-height:1.7;margin-top:24px}.below{text-align:center;font-size:12px;margin:25px auto;color:#697078}.language{text-align:center;margin:24px auto}.error{background:#fff2f1;color:#a52e28;border-left:3px solid #c52b26;padding:12px;line-height:1.5}.eyebrow{font-size:10px;font-weight:bold;letter-spacing:2px;color:#7d8b99}.console-brand{padding:30px 40px;display:flex;gap:12px;align-items:center;margin-bottom:65px}.console-brand strong{font-size:18px}.console-brand span{margin-left:auto;font-size:12px;color:#7b8692}footer{text-align:center;padding:25px;color:#8a9095;font-size:11px}
+'''
+    if profile=='wordpress':
+        css+='body{background:#f0f0f1;color:#3c434a}main{padding-top:55px}.wp-symbol{border:3px solid #2271b1;color:#2271b1;border-radius:50%;width:78px;height:78px;line-height:76px;font:italic 64px Georgia;text-align:center;margin:0 auto 26px}.login-box{width:320px!important;border:1px solid #c3c4c7!important;border-radius:0!important;padding:26px 24px!important;box-shadow:0 1px 3px #0000000a!important}input{font-size:24px;padding:5px 8px;border-color:#8c8f94}button{float:right;margin-top:0;background:#2271b1;border-color:#2271b1;padding:8px 14px}.remember{float:left;margin:22px 0}.remember label{margin:0;font-size:12px}.remember input{width:auto;margin:0 5px 0 0}.below{width:320px;text-align:left;padding:0 24px}.device-meta{text-align:center;opacity:.65}.language{font-size:12px}'
+    elif profile=='router':
+        css+='body{background:#eee;font:13px Arial;color:#333}.router-top{height:75px;padding:18px 28px;background:#fff;display:flex;align-items:center;border-bottom:1px solid #aaa}.router-top strong{font:italic bold 35px Arial;color:#333}.router-top span{margin-left:auto;color:#888}.router-toolbar{background:linear-gradient(#fafafa,#d3d3d3);border-bottom:1px solid #aaa;padding:12px 24px;font-weight:bold}.router-toolbar span{margin-left:50px;color:#777;font-weight:normal}.router-workspace{display:grid;grid-template-columns:170px 1fr;min-height:490px}aside{background:#dedede;border-right:1px solid #bcbcbc;padding:20px}aside p{padding:8px 6px;margin:0;border-bottom:1px solid #c7c7c7}section.login-box{margin:65px auto!important;box-shadow:none;border:1px solid #aaa;border-radius:0}h1{font-size:20px}button{background:linear-gradient(#fafafa,#d4d4d4);border-color:#999;color:#333}input{border-radius:0;font-size:14px}.device-meta{font-size:10px}'
+    elif profile=='camera':
+        css+='body{background:#f5f6f7;color:#3f4449}.nvr-top{height:88px;background:white;border-bottom:1px solid #e1e3e5;padding:0 7%;display:flex;align-items:center;justify-content:space-between}.nvr-top strong{font:bold italic 28px Arial;color:#ce2632;letter-spacing:-1px}.nvr-top .language{margin:0;color:#888}.nvr-layout{max-width:1100px;margin:65px auto;display:grid;grid-template-columns:1.4fr 1fr;gap:70px;align-items:center;padding:0 25px}.nvr-scene{padding:40px;color:#9099a4;background:linear-gradient(135deg,#233143,#101a28);border-radius:4px}.scene-label{letter-spacing:3px;font-size:10px;color:#9aabbc}.channels{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:30px 0}.channels div{height:95px;background:linear-gradient(145deg,#2e4356,#152231);border:1px solid #526070;padding:9px;font:10px monospace;color:#8d9dac}.nvr-scene h2{color:#e6eaf1;margin-top:35px}.nvr-scene p{font-size:11px}section.login-box{border:none;box-shadow:none;background:transparent;padding:15px;max-width:100%}button{width:100%;background:#d82b38;border-color:#d82b38}.device-meta{font-size:10px}input{font-size:14px;height:42px}'
+    elif profile=='nas':
+        css+='body{background:radial-gradient(ellipse at 20% 110%,#164061 0,transparent 60%),linear-gradient(145deg,#0082c9,#00577f);color:white}main{padding-top:65px}.cloud-mark{display:flex;align-items:center;justify-content:center;margin:0 auto 16px}.cloud-mark i{display:block;width:29px;height:29px;border:7px solid white;border-radius:50%;margin:0 -2px}.cloud-mark i:nth-child(2){width:47px;height:47px}.cloud-title{text-align:center;font-size:23px;margin-bottom:28px}section.login-box{background:#ffffffed;border:0;color:#33434b;border-radius:12px;text-align:center}form{text-align:left}button{width:100%;background:#0082c9;border-color:#0082c9;border-radius:24px}.device-meta,.below{text-align:center;color:#deedf5}input{border-radius:7px;font-size:15px}'
+    elif profile=='phpmyadmin':
+        css+='body{background:#fff;color:#444}main{padding-top:65px}.pma-wordmark{text-align:center;color:#e98a22;font:bold italic 32px Georgia;margin-bottom:25px}.pma-wordmark span{color:#527b98}.pma-wordmark small{display:block;font:11px Arial;color:#777;margin-top:6px}section.login-box{width:430px;background:#f5f5f5;border:1px solid #bbb;box-shadow:none;border-radius:6px}h1{font-size:20px;text-align:center}h2{padding:10px;background:linear-gradient(#fff,#ddd);border:1px solid #bbb;font-size:15px}.language{text-align:left;font-size:12px}button{float:right;background:linear-gradient(#fff,#ddd);color:#333;border:1px solid #aaa;padding:6px 22px}input{font-size:14px}.device-meta{font-size:10px}'
+    else:
+        css+='body{background:#f3f6f9;color:#273646}section.login-box{width:410px;padding:36px;border:1px solid #dfe6ed}.console-brand{background:#fff;border-bottom:1px solid #e1e6ec}button{width:100%;background:'+('#176f67' if profile=='api' else '#284766')+';border:0}.device-meta{font-size:10px}'
+    css+='@media(max-width:700px){.router-workspace{grid-template-columns:1fr}.router-workspace aside{display:none}.router-toolbar span{display:none}.nvr-layout{grid-template-columns:1fr;margin:30px auto;gap:25px}.nvr-scene{display:none}.nvr-top{padding:0 20px}.nvr-top .language{font-size:0}.console-brand{padding:22px;margin-bottom:40px}.console-brand span{display:none}main{padding-bottom:30px}.device-meta{padding:0 10px}}'
+    assets={'router':'/webfig/assets/login.css','camera':'/doc/ui/login.css','wordpress':'/wp-includes/css/buttons.min.css','nas':'/core/css/server.css','phpmyadmin':'/phpmyadmin/themes/pmahomme/css/theme.css'}
+    asset='<link rel="stylesheet" href="'+assets[profile]+'">' if profile in assets else ''
+    return trap_shell(device['platform']+' — Login', asset+'<style>'+css+'</style>'+content, profile)
 
 
 def decoy_file(path):
@@ -1814,6 +1899,7 @@ def decoy_file(path):
                 item.external_attr = 0o600 << 16
                 archive.writestr(item, json.dumps(value, indent=2)+'\n')
         return output.getvalue()
+    if path in EXTRA_DECOYS: return EXTRA_DECOYS[path]
     return {
         '/.env':'APP_ENV=production\nAPP_NAME=gateway-manager\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_DATABASE=gateway\nDB_USERNAME=gateway_app\nDB_PASSWORD=gw_local_R7m2q8v4\n',
         '/.git/config':'[core]\n    repositoryformatversion = 0\n    bare = false\n[remote "origin"]\n    url = ssh://git@git.infra.lan/network/gateway-config.git\n    fetch = +refs/heads/*:refs/remotes/origin/*\n',
@@ -1828,13 +1914,15 @@ def clean_agent(agent):
 def scan_classification(path):
     path=path.lower()
     checks=[
-        ('Pliki konfiguracyjne',('konfiguracja',),lambda p: p.endswith('/.env') or p=='/.env' or p.endswith('/config.json')),
+        ('Docker API',('ścieżka API silnika kontenerów',),lambda p: docker_path(p) is not None),
+        ('phpMyAdmin',('panel bazy danych',),lambda p: p.startswith(('/phpmyadmin','/pma'))),
+        ('Pliki konfiguracyjne',('konfiguracja',),lambda p: p.endswith('/.env') or p=='/.env' or p.endswith('/config.json') or p in DECOY_PATHS and p not in ('/backup.zip','/.git/config')),
         ('Repozytorium Git',('metadane Git',),lambda p: '/.git/' in p),
         ('Kopie zapasowe',('nazwa archiwum',),lambda p: any(p.endswith(ext) for ext in ('.zip','.bak','.sql','.tar.gz'))),
         ('WordPress',('ścieżka WordPress',),lambda p: 'wp-' in p or '/wordpress' in p),
-        ('Router / CGI',('CGI albo konsola routera',),lambda p: '/cgi-bin/' in p or '/traps/router' in p or p.startswith('/router')),
-        ('Kamera IP',('konsola kamery',),lambda p: '/camera' in p),
-        ('NAS',('konsola pamięci sieciowej',),lambda p: '/nas' in p or p.startswith('/storage')),
+        ('Router / CGI',('CGI albo konsola routera',),lambda p: '/cgi-bin/' in p or '/traps/router' in p or p.startswith(('/router','/webfig'))),
+        ('Kamera IP',('konsola kamery',),lambda p: '/camera' in p or p.startswith('/doc/page/')),
+        ('NAS',('konsola pamięci sieciowej',),lambda p: '/nas' in p or p.startswith(('/storage','/nextcloud','/index.php/login'))),
         ('API',('ścieżka API',),lambda p: p.startswith('/api') or '/traps/api' in p),
         ('Panel administracyjny',('ścieżka logowania',),lambda p: '/admin' in p or '/login' in p or p.startswith('/console'))
     ]
@@ -1909,6 +1997,9 @@ def run_health_checks():
     ports,_=net_ports();age=now-ENDLESSH_SUCCESS if ENDLESSH_SUCCESS else None
     ready=ENDLESSH_PORT in ports and age is not None and age<=config['endlessh_stale_seconds'] and not ENDLESSH_ERROR
     checks['Endlessh']={'ok':ready if ENDLESSH_SUCCESS or now-BOOT>30 else None,'detail':'Nasłuch: '+('TAK' if ENDLESSH_PORT in ports else 'NIE')+' · ostatni odczyt logu: '+('brak' if age is None else str(round(age))+' s temu'),'at':now}
+    if CONFIG['ssh_capture']['enabled']:
+        # Port health is paired with the successfully readable session log.
+        checks['SSH Capture']=checks.pop('Endlessh')
     with HEALTH_LOCK:
         HEALTH_STATE.clear();HEALTH_STATE.update(checks)
     return checks
@@ -2047,6 +2138,196 @@ def rule_alerts(now=None):
                 if rows:
                     alerts.append(('watch:'+str(rule_id),'Reguła '+name+': '+', '.join(ip+' ('+str(count)+')' for ip,count in rows)+' w '+str(window)+' s; do 5 adresów'))
     return alerts
+
+
+
+# Shared acknowledgement advances only through an authenticated, signed POST.
+def updates_page():
+    now = time.time()
+    rows = []
+    with DB_LOCK:
+        with db_connect() as c:
+            previous = float(meta_get(c, 'updates_seen', str(now-86400)))
+            previous = min(previous, now)
+            count = c.execute('SELECT COUNT(*) FROM events WHERE ts>? AND ts<=?', (previous, now)).fetchone()[0]
+            ips = c.execute('SELECT ip,MIN(ts) FROM events GROUP BY ip HAVING MIN(ts)>? AND MIN(ts)<=? ORDER BY MIN(ts) DESC LIMIT 50', (previous, now)).fetchall()
+            paths = c.execute('SELECT path,MIN(ts) FROM events GROUP BY path HAVING MIN(ts)>? AND MIN(ts)<=? ORDER BY MIN(ts) DESC LIMIT 50', (previous, now)).fetchall()
+            recent = c.execute('SELECT ts,ip,path FROM events WHERE ts>? AND ts<=? ORDER BY ts DESC LIMIT 50', (previous, now)).fetchall()
+    items = ''.join('<tr><td>'+stamp(ts)+'</td><td>'+ip_link(ip)+'</td><td>'+esc(path)+'</td></tr>' for ts,ip,path in recent)
+    return layout('Co nowego', '<section class="box"><p>Od '+stamp(previous)+' do '+stamp(now)+': <b>'+str(count)+'</b> żądań HTTP.</p><p>Wspólny punkt odniesienia dla panelu. Przy pierwszym otwarciu: ostatnie 24 godziny. Nowość oznacza pierwsze wystąpienie w zachowanej historii HTTP. Listy: maks. 50 pozycji.</p><form method="post" action="/notes/save"><input type="hidden" name="action" value="seen"><input type="hidden" name="until" value="'+str(now)+'"><input type="hidden" name="token" value="'+esc(admin_token('seen:'+str(now)))+'"><button>Oznacz jako przeczytane</button></form></section><div class="grid"><section class="box"><h2>Nowe IP</h2>'+(' · '.join(ip_link(ip) for ip,_ in ips) or 'Brak')+'</section><section class="box"><h2>Nowe ścieżki</h2>'+('<br>'.join(esc(path) for path,_ in paths) or 'Brak')+'</section></div><section class="box"><h2>Ostatnie żądania</h2><table><tr><th>Czas</th><th>IP</th><th>Ścieżka</th></tr>'+items+'</table></section>')
+
+
+def period_counts(start, end):
+    with DB_LOCK:
+        with db_connect() as c:
+            http, ips = c.execute('SELECT COUNT(*),COUNT(DISTINCT ip) FROM events WHERE ts>=? AND ts<?',(start,end)).fetchone()
+            ssh = c.execute('SELECT COUNT(*) FROM endlessh_sessions WHERE started>=? AND started<?',(start,end)).fetchone()[0]
+            auth = c.execute('SELECT COUNT(*) FROM auth_events WHERE ts>=? AND ts<?',(start,end)).fetchone()[0]
+    return (http, ips, ssh, auth)
+
+
+def comparison_page(params=None):
+    period = (params or {}).get('period','24h')
+    windows = {'24h':86400, '7d':604800, '30d':2592000}
+    if period not in windows: raise ValueError('Nieprawidłowy okres')
+    now=time.time(); window=windows[period]
+    current=period_counts(now-window,now); previous=period_counts(now-2*window,now-window)
+    rows=''
+    for name,a,b in zip(('Żądania HTTP','Różne IP HTTP','Rozpoczęte sesje Endlessh','Błędy SSH'),current,previous):
+        delta = ('%+.1f%%' % (100*(a-b)/b)) if b else ('nowy ruch' if a else '0%')
+        rows+='<tr><td>'+name+'</td><td>'+str(a)+'</td><td>'+str(b)+'</td><td>'+str(a-b)+'</td><td>'+delta+'</td></tr>'
+    return layout('Porównania okresów','<section class="box"><p><a href="?period=24h">24 godziny</a> · <a href="?period=7d">7 dni</a> · <a href="?period=30d">30 dni</a></p><p>Bieżący: '+stamp(now-window)+' – '+stamp(now)+'<br>Poprzedni: '+stamp(now-2*window)+' – '+stamp(now-window)+'</p><table><tr><th>Metryka</th><th>Bieżący</th><th>Poprzedni</th><th>Różnica</th><th>Zmiana</th></tr>'+rows+'</table><p class="muted">Ruchome okresy o tej samej długości. Dane podlegają retencji; brak historii nie oznacza braku ruchu. IP może reprezentować wiele urządzeń.</p></section>')
+
+
+def note_form(ip):
+    ip=canonical_ip(ip)
+    with DB_LOCK:
+        with db_connect() as c:
+            row=c.execute('SELECT label,note,updated FROM ip_notes WHERE ip=?',(ip,)).fetchone()
+    label,note,updated=row or ('','',None)
+    return '<section class="box"><h2>Notatka i etykieta IP</h2><form method="post" action="/notes/save"><input type="hidden" name="ip" value="'+esc(ip)+'"><input type="hidden" name="token" value="'+esc(admin_token('note:'+ip))+'"><label>Etykieta<input name="label" maxlength="80" value="'+esc(label)+'"></label><label>Notatka<textarea name="note" rows="4" maxlength="2000">'+esc(note)+'</textarea></label><button>Zapisz</button></form><p>Ostatnia zmiana: '+stamp(updated)+'. Puste pola usuwają notatkę. Notatki są wspólne i objęte backupem telemetrii.</p></section>'
+
+
+def change_note(fields):
+    def one(key):
+        values=fields.get(key,[''])
+        if len(values)!=1: raise ValueError('Powtórzone pole')
+        return values[0]
+    if one('action')=='seen':
+        until=one('until'); verify_admin_token(one('token'),'seen:'+until)
+        value=float(until)
+        if not math.isfinite(value) or not 0<=value<=time.time()+30: raise ValueError('Nieprawidłowy czas')
+        with DB_LOCK:
+            with db_connect() as c:
+                meta_set(c,'updates_seen',max(value,float(meta_get(c,'updates_seen','0'))))
+        return
+    ip=canonical_ip(one('ip')); verify_admin_token(one('token'),'note:'+ip)
+    label=one('label').strip(); note=one('note').strip()
+    if len(label)>80 or len(note)>2000: raise ValueError('Za długa notatka')
+    with DB_LOCK:
+        with db_connect() as c:
+            if not label and not note: c.execute('DELETE FROM ip_notes WHERE ip=?',(ip,))
+            else: c.execute('INSERT OR REPLACE INTO ip_notes VALUES (?,?,?,?)',(ip,label,note,time.time()))
+
+
+EXTRA_DECOYS = {
+    '/.env.production':'APP_ENV=production\nAPP_DEBUG=false\nDB_HOST=127.0.0.1\nDB_DATABASE=webapp\nDB_USERNAME=webapp\nDB_PASSWORD=local_db_m4R8k2\n',
+    '/wp-config.php.bak':"<?php\ndefine('DB_NAME', 'wordpress');\ndefine('DB_USER', 'wp_app');\ndefine('DB_PASSWORD', 'wp_local_v7Q2k9');\ndefine('DB_HOST', 'localhost');\n$table_prefix = 'wp_';\n",
+    '/config.php.bak':"<?php\nreturn ['host'=>'localhost','database'=>'app','username'=>'app_user','password'=>'db_local_f8S2n4'];\n",
+    '/docker-compose.yml':'services:\n  web:\n    image: nginx:1.26-alpine\n    ports: ["8080:80"]\n  db:\n    image: mysql:8.0\n    environment:\n      MYSQL_DATABASE: webapp\n      MYSQL_USER: webapp\n      MYSQL_PASSWORD: local_db_m4R8k2\n',
+    '/.aws/credentials':'[default]\naws_access_key_id = LOCALAPPACCESS01\naws_secret_access_key = internal_archive_access_local_2025\n',
+}
+DECOY_PATHS = {'/.env','/.git/config','/backup.zip','/config.json'} | set(EXTRA_DECOYS)
+
+
+def docker_path(path):
+    normalized=re.sub(r'^/v1\.\d{1,3}(?=/)', '', path).rstrip('/') or '/'
+    if normalized in ('/_ping','/version','/info','/containers/json','/images/json','/containers/create','/images/create','/build') or normalized.startswith(('/containers/','/exec/')):
+        return normalized
+    return None
+
+
+def docker_response(path, method):
+    route=docker_path(path)
+    if route is None: return None
+    if method not in ('GET','HEAD'):
+        return 403,json.dumps({'message':'authorization denied by plugin policy'}),'application/json; charset=utf-8'
+    data={
+        '/version':{'Platform':{'Name':'Docker Engine - Community'},'Version':'24.0.9','ApiVersion':'1.43','MinAPIVersion':'1.12','Os':'linux','Arch':'amd64','GoVersion':'go1.20.13','GitCommit':'fca702d','KernelVersion':'6.1.0','BuildTime':'2024-02-01T00:00:00.000000000+00:00'},
+        '/info':{'ID':'0bd7d051-99b0-42c9-bb6d-a91e84c08c27','Name':'engine-01','Containers':1,'ContainersRunning':1,'ContainersPaused':0,'ContainersStopped':0,'Images':1,'Driver':'overlay2','OSType':'linux','Architecture':'x86_64','NCPU':2,'MemTotal':2147483648,'DockerRootDir':'/var/lib/docker','ServerVersion':'24.0.9'},
+        '/containers/json':[{'Id':'7b8c2a10'+'0'*56,'Names':['/web'],'Image':'nginx:1.26-alpine','ImageID':'sha256:'+'a'*64,'Command':'nginx -g daemon off;','Created':1735689600,'State':'running','Status':'Up 2 days','Ports':[{'IP':'0.0.0.0','PrivatePort':80,'PublicPort':8080,'Type':'tcp'}],'Labels':{},'Mounts':[]}],
+        '/images/json':[{'Id':'sha256:'+'a'*64,'RepoTags':['nginx:1.26-alpine'],'RepoDigests':[],'Created':1735689600,'Size':49283072,'SharedSize':-1,'VirtualSize':49283072,'Labels':{},'Containers':1}]
+    }
+    if route=='/_ping': return 200,'OK','text/plain; charset=utf-8'
+    if route in data: return 200,json.dumps(data[route]),'application/json; charset=utf-8'
+    return 404,json.dumps({'message':'No such container or endpoint'}),'application/json; charset=utf-8'
+
+
+def trap_alerts(now=None):
+    now=time.time() if now is None else now
+    labels=('Docker API','phpMyAdmin','Pliki konfiguracyjne')
+    with DB_LOCK:
+        with db_connect() as c:
+            c.create_function('is_public',1,lambda ip: int(ipaddress.ip_address(canonical_ip(ip)).is_global))
+            rows=c.execute('SELECT d.scan_label,COUNT(*),COUNT(DISTINCT e.ip) FROM events e JOIN http_details d ON d.event_id=e.rowid WHERE e.ts>=? AND e.ts<=? AND is_public(e.ip)=1 AND d.scan_label IN (?,?,?) GROUP BY d.scan_label',(now-900,now,*labels)).fetchall()
+    result=[('trap:'+label,label+': '+str(count)+' prób / 15 min, '+str(ips)+' IP') for label,count,ips in rows]
+    if CONFIG['ssh_capture']['enabled'] and os.path.exists(CREDENTIALS_DB):
+        with DB_LOCK:
+            with credentials_connect() as c:
+                c.create_function('is_public',1,lambda ip: int(ipaddress.ip_address(canonical_ip(ip)).is_global))
+                count,ips=c.execute("SELECT COUNT(*),COUNT(DISTINCT ip) FROM submissions WHERE profile='ssh' AND ts>=? AND ts<=? AND is_public(ip)=1",(now-900,now)).fetchone()
+        if count: result.append(('trap:ssh','SSH Capture: '+str(count)+' prób / 15 min, '+str(ips)+' IP'))
+    return result
+
+
+def capture_payload(body, content_type, profile, path=''):
+    if content_type == 'application/x-www-form-urlencoded':
+        fields=parse_qs(body.decode('utf-8','strict'),keep_blank_values=True,max_num_fields=16)
+    elif content_type == 'application/json':
+        obj=json.loads(body.decode('utf-8','strict'))
+        if not isinstance(obj,dict) or len(obj)>16: raise ValueError('Invalid object')
+        for key in ('params','User','SessionLogin'):
+            if isinstance(obj.get(key),dict): obj=obj[key];break
+        if len(obj)>16 or any(not isinstance(v,(str,int,float,bool,type(None))) for v in obj.values()):
+            raise ValueError('Invalid fields')
+        fields={k:[str(v) if v is not None else ''] for k,v in obj.items()}
+    elif content_type in ('text/xml','application/xml'):
+        text=body.decode('utf-8','strict')
+        if '\x00' in text or '<!' in text: raise ValueError('XML declarations are not supported')
+        import xml.etree.ElementTree as ET
+        try: root=ET.fromstring(text)
+        except ET.ParseError: raise ValueError('Invalid XML') from None
+        if path=='/xmlrpc.php':
+            if root.tag!='methodCall': raise ValueError('Invalid XML-RPC')
+            name=root.findtext('methodName','')
+            offsets={'wp.getUsersBlogs':0,'blogger.getUsersBlogs':1,'wp.getProfile':1,'wp.getUsers':1,'wp.getOptions':1,'metaWeblog.getRecentPosts':1}
+            if name not in offsets: raise ValueError('Unsupported method')
+            values=[]
+            for node in root.findall('./params/param/value'):
+                child=node[0] if len(node)==1 and node[0].tag in ('string','int','i4') else None
+                if len(node)>1 or len(node)==1 and child is None: raise ValueError('Invalid parameters')
+                values.append(child.text or '' if child is not None else node.text or '')
+            offset=offsets[name]
+            if len(values)<offset+2 or len(values)>16: raise ValueError('Invalid parameters')
+            return values[offset],values[offset+1]
+        fields={node.tag.split('}')[-1]:[node.text or ''] for node in root.iter() if not len(node)}
+        if len(fields)>16: raise ValueError('Too many fields')
+    else:
+        raise TypeError('Unsupported media type')
+    return login_fields(fields,profile)
+
+
+def device_headers(profile):
+    # Opaque, short-lived values do not create a real authenticated session.
+    name={'wordpress':'wordpress_test_cookie','phpmyadmin':'phpMyAdmin','camera':'WebSession','router':'webfig','nas':'nc_session_id'}.get(profile,'sessionid')
+    value='WP%20Cookie%20check' if profile=='wordpress' else secrets.token_hex(16)
+    return {'Set-Cookie':name+'='+value+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=600'}
+
+
+def device_asset(path):
+    profiles={'/webfig/assets/login.css':'router','/doc/ui/login.css':'camera','/wp-includes/css/buttons.min.css':'wordpress','/core/css/server.css':'nas','/phpmyadmin/themes/pmahomme/css/theme.css':'phpmyadmin'}
+    profile=profiles.get(path)
+    if not profile or profile not in CONFIG['honeypots']['enabled']: return None
+    return '/* '+TRAP_DEVICES[profile]['platform']+' */ input:focus{outline-offset:1px}button:focus-visible{outline:2px solid #528bc1}'
+
+
+def ssh_capture_import():
+    if not CONFIG['ssh_capture']['enabled']: return
+    path=CONFIG['ssh_capture']['spool']
+    if not os.path.exists(path): return
+    # Read-only access avoids creating root-owned journals in the unprivileged
+    # producer's directory. Persistent acknowledgements prevent resurrection
+    # after a user deletes an imported row. The producer expires its own spool.
+    with contextlib.closing(sqlite3.connect('file:'+path+'?mode=ro',uri=True,timeout=3)) as src:
+        rows=src.execute('SELECT id,ts,ip,username,password FROM attempts WHERE ts>=? ORDER BY ts LIMIT 1000',(time.time()-3600,)).fetchall()
+    with DB_LOCK:
+        with credentials_connect() as dst:
+            for ident,ts,ip,user,password in rows:
+                fresh=dst.execute('INSERT OR IGNORE INTO imported_sources VALUES (?,?)',(ident,ts)).rowcount
+                if fresh and CONFIG['capture_credentials'] and ts>=time.time()-CONFIG['retention']['credentials_days']*86400:
+                    dst.execute('INSERT OR IGNORE INTO submissions (ts,ip,username,password,profile,source_id) VALUES (?,?,?,?,?,?)',(ts,ip,user,password,'ssh','ssh:'+ident))
+            dst.execute('DELETE FROM imported_sources WHERE ts<?',(time.time()-7200,))
+            prune_credentials(dst,time.time())
 
 
 if __name__ == '__main__':

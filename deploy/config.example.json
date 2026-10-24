@@ -67,10 +67,12 @@
       "nas",
       "admin",
       "wordpress",
-      "api"
+      "api",
+      "phpmyadmin"
     ],
     "homepage": "hub",
-    "ssh_public_port": 0
+    "ssh_public_port": 0,
+    "docker_api": true
   },
   "health_checks": {
     "gatus_url": "http://127.0.0.1:21888/health",
@@ -78,5 +80,9 @@
     "interval_seconds": 30,
     "endlessh_stale_seconds": 120
   },
-  "demo_enabled": true
+  "demo_enabled": true,
+  "ssh_capture": {
+    "enabled": false,
+    "spool": "/var/lib/frog-ssh/attempts.sqlite3"
+  }
 }

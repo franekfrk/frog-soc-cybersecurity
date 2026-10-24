@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+name="Frog SSH Capture"
+description="Authentication-only SSH honeypot"
+command="/usr/bin/python3"
+command_args="/opt/frog-soc/ssh_trap.py --port 41888 --state /var/lib/frog-ssh"
+command_user="frogssh:frogssh"
+command_background="yes"
+pidfile="/run/frog-ssh.pid"
+output_log="/var/log/frog-ssh.log"
+error_log="/var/log/frog-ssh.log"
+rc_ulimit="-n 96 -c 0"
+start_pre() {
+    checkpath --directory --mode 0700 --owner frogssh:frogssh /var/lib/frog-ssh || return 1
+    checkpath --file --mode 0600 --owner frogssh:frogssh /var/log/frog-ssh.log || return 1
+}
+depend() { need net; }
